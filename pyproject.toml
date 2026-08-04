@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tweet-threader"
+version = "0.1.0"
+description = "Reconstruct reply branches from X/Twitter archives or IDs and render them as LLM chat inputs."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Claudio Brandolino" }
+]
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Text Processing",
+]
+
+[project.urls]
+Homepage = "https://ariadne.hyperplex.org"
+Repository = "https://github.com/lumpenspace/tweet-threader"
+Issues = "https://github.com/lumpenspace/tweet-threader/issues"
+
+[project.scripts]
+tweet-threader = "tweet_threader.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tweet_threader"]
