@@ -25,33 +25,36 @@ class NitterRssClient:
         self,
         *,
         base_url: str = "https://nitter.net",
+        url_template: str | None = None,
         timeout: float = 20.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.url_template = url_template
         self.timeout = timeout
 
     def get_user_posts(self, username: str, *, since=None) -> UnofficialTimelineResult:
         username = username.strip("@")
+        source_label = self.url_template or self.base_url
         warnings = [
-            "Using unofficial Nitter/XCancel-style RSS. It may break, be incomplete, be blocked, or omit reply-parent metadata.",
+            f"Using unofficial RSS source {source_label}. It may break, be incomplete, be blocked, or omit reply-parent metadata.",
             "RSS timeline fallback usually returns only the latest feed page; older posts may be unavailable even when --since is older.",
         ]
         try:
             payload = self._request(username)
         except urllib.error.HTTPError as exc:
             return UnofficialTimelineResult(
-                warnings=warnings + [f"Unofficial RSS request failed with HTTP {exc.code} from {self.base_url}"]
+                warnings=warnings + [f"Unofficial RSS request failed with HTTP {exc.code} from {source_label}"]
             )
         except (urllib.error.URLError, TimeoutError) as exc:
             return UnofficialTimelineResult(
-                warnings=warnings + [f"Unofficial RSS request failed from {self.base_url}: {exc}"]
+                warnings=warnings + [f"Unofficial RSS request failed from {source_label}: {exc}"]
             )
         except ET.ParseError as exc:
             return UnofficialTimelineResult(
-                warnings=warnings + [f"Unofficial RSS response from {self.base_url} was not parseable XML: {exc}"]
+                warnings=warnings + [f"Unofficial RSS response from {source_label} was not parseable XML: {exc}"]
             )
 
-        tweets = tweets_from_nitter_rss(payload, username=username, source=f"unofficial-rss:{self.base_url}")
+        tweets = tweets_from_nitter_rss(payload, username=username, source=f"unofficial-rss:{source_label}")
         tweets = [tweet for tweet in tweets if is_on_or_after(tweet.created_at, since)]
         if not tweets:
             warnings.append(f"Unofficial RSS returned no matching tweets for @{username}")
@@ -62,16 +65,22 @@ class NitterRssClient:
         return FetchResult(tweets=result.tweets)
 
     def _request(self, username: str) -> bytes:
-        url = f"{self.base_url}/{urllib.parse.quote(username)}/rss"
+        url = self._feed_url(username)
         request = urllib.request.Request(
             url,
             headers={
                 "Accept": "application/rss+xml, application/xml, text/xml",
-                "User-Agent": "Mozilla/5.0 tweet-threader/0.1",
+                "User-Agent": "Mozilla/5.0 ariadne/0.1",
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return response.read()
+
+    def _feed_url(self, username: str) -> str:
+        quoted = urllib.parse.quote(username)
+        if self.url_template:
+            return self.url_template.format(username=quoted, raw_username=username)
+        return f"{self.base_url}/{quoted}/rss"
 
 
 def tweets_from_nitter_rss(payload: bytes | str, *, username: str, source: str) -> list[Tweet]:
@@ -155,4 +164,3 @@ class _TextParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         self.parts.append(data)
-

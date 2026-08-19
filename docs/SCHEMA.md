@@ -1,12 +1,12 @@
 # Output Schemas
 
-tweet-threader currently emits four families of output.
+ariadne currently emits four families of output.
 
 ## `json`
 
 Machine-readable graph output:
 
-- `format`: `tweet-threader.json.v1`
+- `format`: `ariadne.json.v1`
 - `conversations`: branch paths, quote paths, warnings, and IDs
 - `tweets`: normalized tweet records keyed by ID
 
@@ -25,8 +25,8 @@ JSONL documents intended for retrieval, chunking, and future RAFT ingestion. Eac
 ```json
 {
   "format": "raft.documents.v1",
-  "id": "tweet-thread:1002",
-  "source": "tweet-threader",
+  "id": "ariadne:1002",
+  "source": "ariadne",
   "kind": "tweet_conversation",
   "text": "@alice: root tweet\n\n@bob: reply tweet",
   "metadata": {

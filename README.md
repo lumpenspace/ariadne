@@ -1,4 +1,4 @@
-# tweet-threader
+# ariadne
 
 Experimental CLI utility for turning reply tweets into complete branch context, LLM-style chat input, and Raft-ready retrieval documents.
 
@@ -13,27 +13,29 @@ python3 -m pip install -e .
 Without installing, run from the repo with:
 
 ```bash
-PYTHONPATH=src python3 -m tweet_threader --help
+PYTHONPATH=src python3 -m ariadne --help
 ```
 
 ## Examples
 
-Interactive mode:
+Interactive mode asks for a username and/or archive, a date, then runs a
+cheap-source pass first. It prints a summary and only then asks whether to
+continue with X API:
 
 ```bash
-tweet-threader interactive
+ariadne interactive
 ```
 
 From an archive only:
 
 ```bash
-tweet-threader --archive ~/Downloads/twitter-archive.zip --format markdown 1234567890123456789
+ariadne --archive ~/Downloads/twitter-archive.zip --format markdown 1234567890123456789
 ```
 
 Try the included fixture:
 
 ```bash
-tweet-threader \
+ariadne \
   --archive examples/fixture_archive \
   --format markdown \
   1002
@@ -42,7 +44,7 @@ tweet-threader \
 All loaded tweets by a user since a date, including the reply branch around each selected tweet:
 
 ```bash
-tweet-threader \
+ariadne \
   --archive ~/Downloads/twitter-archive.zip \
   --for-user alice \
   --since 2024-01-01 \
@@ -53,7 +55,7 @@ tweet-threader \
 From a generic dump:
 
 ```bash
-tweet-threader \
+ariadne \
   --tweets-file ./tweets.jsonl \
   --for-user alice \
   --since 2024-01-01 \
@@ -65,7 +67,7 @@ From IDs/URLs with live fetching:
 
 ```bash
 export X_BEARER_TOKEN="..."
-tweet-threader --fetch --format messages \
+ariadne --fetch --format messages \
   https://x.com/someone/status/1234567890123456789 \
   1234567890123456790
 ```
@@ -73,14 +75,14 @@ tweet-threader --fetch --format messages \
 Strict OpenAI-style messages:
 
 ```bash
-tweet-threader --archive archive.zip --fetch --format openai 1234567890123456789
+ariadne --archive archive.zip --fetch --format openai 1234567890123456789
 ```
 
 Fetch the user's own timeline through X API before building:
 
 ```bash
 export X_BEARER_TOKEN="..."
-tweet-threader \
+ariadne \
   --for-user alice \
   --since 2024-01-01 \
   --fetch-user-timeline \
@@ -92,7 +94,7 @@ tweet-threader \
 No dump and no X API token, trying the unofficial free RSS fallback:
 
 ```bash
-tweet-threader \
+ariadne \
   --for-user alice \
   --since 2024-01-01 \
   --unofficial-rss \
@@ -100,10 +102,38 @@ tweet-threader \
   --format json
 ```
 
+Arbitrary public target, cheap-first by default:
+
+```bash
+ariadne \
+  --target-user alice \
+  --since 2024-01-01 \
+  --format raft \
+  --output data/alice-cheap-pass.jsonl
+```
+
+Arbitrary public target, but allow paid X API only after RSS/oEmbed/cache have
+been tried:
+
+```bash
+export X_BEARER_TOKEN="..."
+ariadne \
+  --target-user alice \
+  --since 2024-01-01 \
+  --fetch \
+  --fetch-user-timeline \
+  --max-user-pages 2 \
+  --format raft
+```
+
+Archive-only interactive runs can leave the username blank; ariadne will
+use the archive account when it can infer one, otherwise it selects all loaded
+tweets on or after `--since`.
+
 Raft-ready JSONL:
 
 ```bash
-tweet-threader \
+ariadne \
   --archive ~/Downloads/twitter-archive.zip \
   --for-user alice \
   --since 2020-01-01 \
@@ -115,16 +145,18 @@ tweet-threader \
 Inspect what an archive contributes:
 
 ```bash
-tweet-threader inspect-archive ~/Downloads/twitter-archive.zip
+ariadne inspect-archive ~/Downloads/twitter-archive.zip
 ```
 
 ## Notes
 
 - This is alpha software. It is designed to be clear about source quality and failure modes, not to promise complete reconstruction from incomplete public data.
+- `--target-user` is the convenience mode for arbitrary public accounts. It uses local cache/archive data, unofficial RSS, and oEmbed before any X API reads. Add `--fetch --fetch-user-timeline` only when you are ready to spend official API reads.
 - Live X API fetching is opt-in via `--fetch` and `--fetch-user-timeline`; without it, missing posts are represented as unavailable placeholders.
 - `--oembed` uses the public X oEmbed endpoint to hydrate tweet text/author/date when a canonical tweet URL is known. oEmbed does not expose reply-parent metadata, so it cannot complete a branch by itself.
-- `--unofficial-rss` tries a Nitter/XCancel-style RSS endpoint such as `https://nitter.net/{username}/rss`. This is unsupported, fragile, usually limited to recent feed items, and usually omits reply-parent metadata.
-- X API fetching uses v2 Post lookup (`GET /2/tweets`) and user timeline lookup (`GET /2/users/{id}/tweets`) with `referenced_tweets.id` and author expansions, then caches responses in `.tweet-threader-cache.json` by default.
+- `--unofficial-rss` tries a Nitter/XCancel-style RSS endpoint such as `https://nitter.net/{username}/rss`. `--target-user` tries both `https://nitter.net` and `https://xcancel.com` unless disabled. This is unsupported, fragile, usually limited to recent feed items, and usually omits reply-parent metadata.
+- `--rss-url-template` can add other cheap feed services, for example a hosted feed URL containing `{username}`.
+- X API fetching uses v2 Post lookup (`GET /2/tweets`) and user timeline lookup (`GET /2/users/{id}/tweets`) with `referenced_tweets.id` and author expansions, then caches responses in `.ariadne-cache.json` by default.
 - The cache avoids repeat lookups locally. X API reads may still count toward your account usage according to the current X API plan.
 - `--since` filters which user-authored tweets become branch targets. Older parent tweets are still included when needed to complete a selected branch.
 - Reply reconstruction follows only the branch from the target reply back to its root. Sibling replies are intentionally not pulled in.

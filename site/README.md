@@ -1,6 +1,6 @@
-# tweet-threader site
+# ariadne site
 
-This is the public site for `tweet-threader`, built as a small Next app for
+This is the public site for `ariadne`, built as a small Next app for
 Vercel.
 
 ## Prerequisites
@@ -27,7 +27,7 @@ npm test
 The intended production hostname is `ariadne.hyperplex.org`.
 
 ```bash
-vercel link --project tweet-threader
+vercel link --project ariadne
 vercel --prod
 vercel alias set <deployment-url> ariadne.hyperplex.org
 ```

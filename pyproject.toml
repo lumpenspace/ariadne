@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tweet-threader"
+name = "ariadne"
 version = "0.1.0"
 description = "Reconstruct reply branches from X/Twitter archives or IDs and render them as LLM chat inputs."
 readme = "README.md"
@@ -27,11 +27,11 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://ariadne.hyperplex.org"
-Repository = "https://github.com/lumpenspace/tweet-threader"
-Issues = "https://github.com/lumpenspace/tweet-threader/issues"
+Repository = "https://github.com/lumpenspace/ariadne"
+Issues = "https://github.com/lumpenspace/ariadne/issues"
 
 [project.scripts]
-tweet-threader = "tweet_threader.cli:main"
+ariadne = "ariadne.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tweet_threader"]
+packages = ["src/ariadne"]

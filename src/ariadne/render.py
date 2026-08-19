@@ -33,7 +33,7 @@ def render_json(conversations: list[Conversation], store: TweetStore) -> str:
     for conversation in conversations:
         ids.update(conversation.all_ids)
     payload = {
-        "format": "tweet-threader.json.v1",
+        "format": "ariadne.json.v1",
         "conversations": [conversation.to_dict() for conversation in conversations],
         "tweets": {
             tweet.id: tweet.to_dict(include_raw=False)
@@ -116,8 +116,8 @@ def render_raft_jsonl(conversations: list[Conversation], store: TweetStore) -> s
         target = store.get(conversation.target_id)
         row = {
             "format": "raft.documents.v1",
-            "id": f"tweet-thread:{conversation.target_id}",
-            "source": "tweet-threader",
+            "id": f"ariadne:{conversation.target_id}",
+            "source": "ariadne",
             "kind": "tweet_conversation",
             "text": "\n\n".join(text_blocks),
             "metadata": {

@@ -8,19 +8,56 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tweet_threader.archive import load_archive
-from tweet_threader.fetch import tweet_from_oembed_payload
-from tweet_threader.ids import extract_tweet_ids
-from tweet_threader.models import Tweet, TweetRef
-from tweet_threader.reconstruct import ConversationBuilder
-from tweet_threader.render import render
-from tweet_threader.sources import load_tweets_file, select_user_tweet_ids
-from tweet_threader.store import TweetStore
-from tweet_threader.timeutil import parse_since
-from tweet_threader.unofficial import tweets_from_nitter_rss
+from ariadne.archive import load_archive
+from ariadne.cli import CheapFirstFetcher, collect_conversations, needs_official_metadata
+from ariadne.fetch import FetchResult, tweet_from_oembed_payload
+from ariadne.ids import extract_tweet_ids
+from ariadne.models import Tweet, TweetRef
+from ariadne.reconstruct import ConversationBuilder
+from ariadne.render import render
+from ariadne.sources import load_tweets_file, select_user_tweet_ids
+from ariadne.store import TweetStore
+from ariadne.timeutil import parse_since
+from ariadne.unofficial import NitterRssClient, tweets_from_nitter_rss
 
 
-class TweetThreaderTests(unittest.TestCase):
+def argparse_namespace(**overrides):
+    defaults = {
+        "items": [],
+        "input_file": [],
+        "archive": [],
+        "tweets_file": [],
+        "for_user": None,
+        "target_user": None,
+        "author_id": None,
+        "all_loaded": False,
+        "since": None,
+        "cheap_first": True,
+        "oembed": False,
+        "no_oembed": True,
+        "hydrate_all": False,
+        "fetch": False,
+        "fetch_user_timeline": False,
+        "unofficial_rss": False,
+        "no_unofficial_rss": True,
+        "rss_base": [],
+        "rss_url_template": [],
+        "max_user_pages": None,
+        "bearer_token": None,
+        "cache": ".ariadne-cache.json",
+        "no_cache": True,
+        "format": "messages",
+        "output": None,
+        "strict": False,
+        "max_depth": 50,
+        "no_quotes": False,
+        "allow_empty": False,
+    }
+    defaults.update(overrides)
+    return type("Args", (), defaults)()
+
+
+class AriadneTests(unittest.TestCase):
     def test_extracts_ids_from_urls_and_lists(self) -> None:
         ids = extract_tweet_ids(
             [
@@ -119,7 +156,7 @@ class TweetThreaderTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["format"], "raft.documents.v1")
-        self.assertEqual(rows[0]["id"], "tweet-thread:2")
+        self.assertEqual(rows[0]["id"], "ariadne:2")
         self.assertIn("@alice: root", rows[0]["text"])
         self.assertEqual(rows[0]["metadata"]["tweet_ids"], ["1", "2"])
         self.assertEqual(rows[0]["messages"][1]["role"], "participant")
@@ -194,7 +231,7 @@ class TweetThreaderTests(unittest.TestCase):
                 self.ids: list[str] = []
 
             def get_posts(self, ids: list[str]):
-                from tweet_threader.fetch import FetchResult
+                from ariadne.fetch import FetchResult
 
                 self.ids.extend(ids)
                 return FetchResult(tweets=[Tweet(id="1", text="parent", username="alice")])
@@ -244,6 +281,83 @@ class TweetThreaderTests(unittest.TestCase):
         self.assertEqual(tweets[0].name, "Alice Example")
         self.assertEqual(tweets[0].text, "Hello from RSS\nsecond line")
         self.assertEqual(tweets[0].url, "https://x.com/alice/status/123456789")
+
+    def test_rss_url_template_formats_encoded_username(self) -> None:
+        client = NitterRssClient(url_template="https://feeds.example/{username}.xml")
+
+        self.assertEqual(
+            client._feed_url("alice bob"),
+            "https://feeds.example/alice%20bob.xml",
+        )
+
+    def test_cheap_first_fetcher_backfills_oembed_metadata_with_paid_fetcher(self) -> None:
+        class FakeFetcher:
+            def __init__(self, tweets: list[Tweet]) -> None:
+                self.tweets = tweets
+                self.calls: list[list[str]] = []
+
+            def get_posts(self, ids: list[str]) -> FetchResult:
+                self.calls.append(ids)
+                found = [tweet for tweet in self.tweets if tweet.id in ids]
+                missing = {tweet_id: "missing" for tweet_id in ids if tweet_id not in {tweet.id for tweet in found}}
+                return FetchResult(tweets=found, errors=missing)
+
+        cheap = FakeFetcher([Tweet(id="1", text="cheap text", source="oembed")])
+        paid = FakeFetcher([Tweet(id="1", text="paid text", source="x-api", referenced_tweets=[TweetRef("replied_to", "0")])])
+
+        result = CheapFirstFetcher(cheap, paid).get_posts(["1"])
+
+        self.assertEqual(cheap.calls, [["1"]])
+        self.assertEqual(paid.calls, [["1"]])
+        self.assertEqual([tweet.source for tweet in result.tweets], ["oembed", "x-api"])
+        self.assertEqual(result.errors, {})
+
+    def test_archive_source_does_not_need_paid_metadata_when_it_has_reply_edges(self) -> None:
+        tweet = Tweet(
+            id="2",
+            text="reply",
+            source="archive:tweets.js",
+            referenced_tweets=[TweetRef("replied_to", "1")],
+        )
+
+        self.assertFalse(needs_official_metadata(tweet))
+
+    def test_collect_conversations_can_select_all_loaded_archive_tweets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dump.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "tweets": [
+                            {
+                                "id": "1",
+                                "text": "old",
+                                "username": "alice",
+                                "created_at": "2023-12-31T23:59:59Z",
+                            },
+                            {
+                                "id": "2",
+                                "text": "new",
+                                "username": "alice",
+                                "created_at": "2024-01-01T00:00:00Z",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = argparse_namespace(
+                tweets_file=[str(path)],
+                all_loaded=True,
+                since="2024-01-01",
+                allow_empty=True,
+            )
+            result = collect_conversations(args)
+
+        self.assertEqual(result.target_ids, ["2"])
+        self.assertEqual(len(result.conversations), 1)
+        self.assertEqual(result.conversations[0].path, ["2"])
 
     def test_fixture_archive_reconstructs_branch(self) -> None:
         archive = Path(__file__).resolve().parents[1] / "examples" / "fixture_archive"

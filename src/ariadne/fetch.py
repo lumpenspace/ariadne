@@ -129,7 +129,7 @@ class XApiClient:
             headers={
                 "Authorization": f"Bearer {self.bearer_token}",
                 "Accept": "application/json",
-                "User-Agent": "tweet-threader/0.1",
+                "User-Agent": "ariadne/0.1",
             },
         )
         try:
@@ -199,7 +199,7 @@ class OEmbedClient:
             f"{self.endpoint}?{query}",
             headers={
                 "Accept": "application/json",
-                "User-Agent": "tweet-threader/0.1",
+                "User-Agent": "ariadne/0.1",
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:

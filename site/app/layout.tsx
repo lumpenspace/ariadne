@@ -14,18 +14,18 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://ariadne.hyperplex.org"),
-  title: "tweet-threader",
+  title: "ariadne",
   description:
     "Archive-first tweet conversation reconstruction for LLM input and Raft-ready retrieval documents.",
   icons: {
     icon: "/og.png",
   },
   openGraph: {
-    title: "tweet-threader",
+    title: "ariadne",
     description:
       "Rebuild reply branches from archives, hydrate cheaply, and export Raft-ready JSONL.",
     url: "https://ariadne.hyperplex.org",
-    siteName: "tweet-threader",
+    siteName: "ariadne",
     images: [
       {
         url: "/og.png",
@@ -37,7 +37,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "tweet-threader",
+    title: "ariadne",
     description:
       "Archive-first tweet conversation reconstruction for LLM input and Raft-ready retrieval documents.",
     images: ["/og.png"],

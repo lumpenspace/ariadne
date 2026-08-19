@@ -14,9 +14,9 @@ const sourceRows = [
 ];
 
 const commands = [
-  "tweet-threader interactive",
-  "tweet-threader --archive archive.zip --for-user alice --since 2020-01-01 --format raft",
-  "tweet-threader --for-user alice --unofficial-rss --format json",
+  "ariadne interactive",
+  "ariadne --archive archive.zip --for-user alice --since 2020-01-01 --format raft",
+  "ariadne --for-user alice --unofficial-rss --format json",
 ];
 
 const outputs = [
@@ -33,13 +33,13 @@ export default function Home() {
         <div className="heroShade" />
         <div className="heroInner">
           <p className="eyebrow">Archive-first tweet reconstruction</p>
-          <h1 id="hero-title">tweet-threader</h1>
+          <h1 id="hero-title">ariadne</h1>
           <p className="lede">
             Rebuild the branch around reply tweets, include quote context, prune
             duplicate subsets, and export conversations as clean AI input.
           </p>
           <div className="heroActions" aria-label="Primary actions">
-            <a className="button primary" href="https://github.com/lumpenspace/tweet-threader">
+            <a className="button primary" href="https://github.com/lumpenspace/ariadne">
               GitHub
             </a>
             <a className="button secondary" href="#raft">
@@ -60,7 +60,7 @@ export default function Home() {
           </div>
           <p>
             A reply without its parent is a fragment. A quote without quoted
-            context is a dangling pointer. tweet-threader turns messy social
+            context is a dangling pointer. ariadne turns messy social
             exports into provenance-preserving documents that downstream RAG and
             fine-tuning systems can actually reason over.
           </p>
@@ -96,7 +96,7 @@ export default function Home() {
         <pre className="codePanel" aria-label="Raft JSONL output example">
           <code>{`{
   "format": "raft.documents.v1",
-  "id": "tweet-thread:1002",
+  "id": "ariadne:1002",
   "kind": "tweet_conversation",
   "text": "@alice: root\\n\\n@bob: reply",
   "metadata": {
