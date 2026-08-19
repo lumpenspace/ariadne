@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ariadne.archive import load_archive
-from ariadne.cli import CheapFirstFetcher, collect_conversations, needs_official_metadata
+from ariadne.cli import CheapFirstFetcher, collect_conversations, is_reply_start, needs_official_metadata
 from ariadne.fetch import FetchResult, tweet_from_oembed_payload
 from ariadne.ids import extract_tweet_ids
 from ariadne.models import Tweet, TweetRef
@@ -31,6 +31,7 @@ def argparse_namespace(**overrides):
         "target_user": None,
         "author_id": None,
         "all_loaded": False,
+        "replies_only": False,
         "since": None,
         "cheap_first": True,
         "oembed": False,
@@ -282,6 +283,24 @@ class AriadneTests(unittest.TestCase):
         self.assertEqual(tweets[0].text, "Hello from RSS\nsecond line")
         self.assertEqual(tweets[0].url, "https://x.com/alice/status/123456789")
 
+    def test_nitter_rss_allows_leading_whitespace(self) -> None:
+        payload = """
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Alice Example / @alice</title>
+    <item>
+      <title>Hello</title>
+      <link>https://nitter.net/alice/status/123456789#m</link>
+      <guid>123456789</guid>
+    </item>
+  </channel>
+</rss>"""
+
+        tweets = tweets_from_nitter_rss(payload, username="alice", source="test")
+
+        self.assertEqual([tweet.id for tweet in tweets], ["123456789"])
+
     def test_rss_url_template_formats_encoded_username(self) -> None:
         client = NitterRssClient(url_template="https://feeds.example/{username}.xml")
 
@@ -322,6 +341,27 @@ class AriadneTests(unittest.TestCase):
 
         self.assertFalse(needs_official_metadata(tweet))
 
+    def test_replies_only_requires_structural_reply_metadata(self) -> None:
+        self.assertTrue(
+            is_reply_start(
+                Tweet(
+                    id="2",
+                    text="reply",
+                    source="archive:tweets.js",
+                    referenced_tweets=[TweetRef("replied_to", "1")],
+                )
+            )
+        )
+        self.assertFalse(
+            is_reply_start(
+                Tweet(
+                    id="3",
+                    text="candidate from a mixed posts-plus-replies RSS feed",
+                    source="unofficial-rss:https://nitter.net/with_replies/rss",
+                )
+            )
+        )
+
     def test_collect_conversations_can_select_all_loaded_archive_tweets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "dump.json"
@@ -358,6 +398,44 @@ class AriadneTests(unittest.TestCase):
         self.assertEqual(result.target_ids, ["2"])
         self.assertEqual(len(result.conversations), 1)
         self.assertEqual(result.conversations[0].path, ["2"])
+
+    def test_replies_only_filters_loaded_targets_to_reply_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dump.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "tweets": [
+                            {
+                                "id": "1",
+                                "text": "root",
+                                "username": "alice",
+                                "created_at": "2024-01-01T00:00:00Z",
+                            },
+                            {
+                                "id": "2",
+                                "text": "reply",
+                                "username": "alice",
+                                "created_at": "2024-01-01T00:01:00Z",
+                                "in_reply_to_id": "1",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = argparse_namespace(
+                tweets_file=[str(path)],
+                for_user="alice",
+                replies_only=True,
+                allow_empty=True,
+            )
+            result = collect_conversations(args)
+
+        self.assertEqual(result.target_ids, ["2"])
+        self.assertEqual(len(result.conversations), 1)
+        self.assertEqual(result.conversations[0].path, ["1", "2"])
 
     def test_fixture_archive_reconstructs_branch(self) -> None:
         archive = Path(__file__).resolve().parents[1] / "examples" / "fixture_archive"

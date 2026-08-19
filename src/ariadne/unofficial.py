@@ -26,21 +26,24 @@ class NitterRssClient:
         *,
         base_url: str = "https://nitter.net",
         url_template: str | None = None,
+        source_label: str | None = None,
         timeout: float = 20.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.url_template = url_template
+        self.source_label = source_label
         self.timeout = timeout
 
     def get_user_posts(self, username: str, *, since=None) -> UnofficialTimelineResult:
         username = username.strip("@")
-        source_label = self.url_template or self.base_url
+        source_label = self.source_label or self.url_template or self.base_url
         warnings = [
             f"Using unofficial RSS source {source_label}. It may break, be incomplete, be blocked, or omit reply-parent metadata.",
             "RSS timeline fallback usually returns only the latest feed page; older posts may be unavailable even when --since is older.",
         ]
         try:
             payload = self._request(username)
+            tweets = tweets_from_nitter_rss(payload, username=username, source=f"unofficial-rss:{source_label}")
         except urllib.error.HTTPError as exc:
             return UnofficialTimelineResult(
                 warnings=warnings + [f"Unofficial RSS request failed with HTTP {exc.code} from {source_label}"]
@@ -54,7 +57,6 @@ class NitterRssClient:
                 warnings=warnings + [f"Unofficial RSS response from {source_label} was not parseable XML: {exc}"]
             )
 
-        tweets = tweets_from_nitter_rss(payload, username=username, source=f"unofficial-rss:{source_label}")
         tweets = [tweet for tweet in tweets if is_on_or_after(tweet.created_at, since)]
         if not tweets:
             warnings.append(f"Unofficial RSS returned no matching tweets for @{username}")
@@ -84,6 +86,10 @@ class NitterRssClient:
 
 
 def tweets_from_nitter_rss(payload: bytes | str, *, username: str, source: str) -> list[Tweet]:
+    if isinstance(payload, bytes):
+        payload = payload.lstrip()
+    else:
+        payload = payload.lstrip()
     root = ET.fromstring(payload)
     channel = root.find("channel")
     if channel is None:

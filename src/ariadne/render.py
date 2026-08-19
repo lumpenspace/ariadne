@@ -28,11 +28,12 @@ def render(
     raise ValueError(f"Unsupported output format: {output_format}")
 
 
-def render_json(conversations: list[Conversation], store: TweetStore) -> str:
+def json_payload(conversations: list[Conversation], store: TweetStore) -> dict[str, Any]:
+    """Build the ``ariadne.json.v1`` payload as data."""
     ids: set[str] = set()
     for conversation in conversations:
         ids.update(conversation.all_ids)
-    payload = {
+    return {
         "format": "ariadne.json.v1",
         "conversations": [conversation.to_dict() for conversation in conversations],
         "tweets": {
@@ -40,12 +41,20 @@ def render_json(conversations: list[Conversation], store: TweetStore) -> str:
             for tweet in store.tweets_for_ids(ids)
         },
     }
-    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def render_messages(
+def render_json(conversations: list[Conversation], store: TweetStore) -> str:
+    return json.dumps(json_payload(conversations, store), indent=2, sort_keys=True) + "\n"
+
+
+def message_conversations(
     conversations: list[Conversation], store: TweetStore, *, strict_openai: bool
-) -> str:
+) -> list[dict[str, Any]]:
+    """Build the rendered message conversations as data.
+
+    Each entry is ``{"target_id", "messages", "warnings"}``. With
+    ``strict_openai`` the messages carry only role/name/content.
+    """
     rendered_conversations: list[dict[str, Any]] = []
     for conversation in conversations:
         quote_map = _quotes_by_owner(conversation.quotes)
@@ -78,15 +87,26 @@ def render_messages(
                 "warnings": conversation.warnings,
             }
         )
+    return rendered_conversations
+
+
+def render_messages(
+    conversations: list[Conversation], store: TweetStore, *, strict_openai: bool
+) -> str:
     payload = {
         "format": "openai.messages.v1" if strict_openai else "messages",
-        "conversations": rendered_conversations,
+        "conversations": message_conversations(
+            conversations, store, strict_openai=strict_openai
+        ),
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def render_raft_jsonl(conversations: list[Conversation], store: TweetStore) -> str:
-    lines: list[str] = []
+def raft_documents(
+    conversations: list[Conversation], store: TweetStore
+) -> list[dict[str, Any]]:
+    """Build the ``raft.documents.v1`` rows as data, one per conversation."""
+    rows: list[dict[str, Any]] = []
     for conversation in conversations:
         quote_map = _quotes_by_owner(conversation.quotes)
         messages: list[dict[str, Any]] = []
@@ -134,7 +154,15 @@ def render_raft_jsonl(conversations: list[Conversation], store: TweetStore) -> s
             "messages": messages,
             "quotes": [quote.to_dict() for quote in conversation.quotes],
         }
-        lines.append(json.dumps(row, sort_keys=True))
+        rows.append(row)
+    return rows
+
+
+def render_raft_jsonl(conversations: list[Conversation], store: TweetStore) -> str:
+    lines = [
+        json.dumps(row, sort_keys=True)
+        for row in raft_documents(conversations, store)
+    ]
     return "\n".join(lines) + ("\n" if lines else "")
 
 

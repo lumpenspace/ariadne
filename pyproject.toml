@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ariadne"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reconstruct reply branches from X/Twitter archives or IDs and render them as LLM chat inputs."
 readme = "README.md"
 requires-python = ">=3.11"

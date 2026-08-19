@@ -5,32 +5,74 @@ import getpass
 import os
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
+from .api import (
+    DEFAULT_RSS_BASES,
+    BuildOptions,
+    BuildResult,
+    CheapFirstFetcher,
+    build_conversations,
+    candidate_reply_lookup_ids,
+    conversation_ids,
+    enrich_after_cheap_sources,
+    hydrate_empty_tweets,
+    is_reply_start,
+    is_selected_since,
+    load_store,
+    make_branch_fetcher,
+    make_x_client,
+    needs_official_metadata,
+    rss_bases,
+    select_targets,
+    should_save_cache,
+    target_username,
+)
 from .archive import load_archive
-from .fetch import FetchResult, OEmbedClient, XApiClient, XApiError
-from .ids import extract_tweet_ids, extract_tweet_url_map, unique_preserve_order
-from .models import Conversation, Tweet
-from .reconstruct import ConversationBuilder
+from .fetch import XApiError
+from .models import Tweet
 from .render import render
-from .sources import load_tweets_file, select_user_tweet_ids
-from .store import TweetStore, load_cache, save_cache
-from .timeutil import is_on_or_after, parse_since
-from .unofficial import NitterRssClient
+from .store import save_cache
+from .ids import unique_preserve_order
 
 
 COMMANDS = {"build", "inspect-archive", "interactive"}
-DEFAULT_RSS_BASES = ("https://nitter.net", "https://xcancel.com")
 
+# The pipeline moved to `api`; this module is now just an argparse front-end.
+# Everything below stays importable from `ariadne.cli` because it was public
+# here before the split.
+collect_conversations = build_conversations
 
-@dataclass
-class BuildResult:
-    store: TweetStore
-    conversations: list[Conversation]
-    warnings: list[str]
-    target_ids: list[str]
-    should_save_cache: bool
+__all__ = [
+    "main",
+    "build_parser",
+    "add_build_arguments",
+    "build",
+    "interactive",
+    "inspect_archive",
+    # Re-exported from `ariadne.api` for backwards compatibility.
+    "BuildOptions",
+    "BuildResult",
+    "CheapFirstFetcher",
+    "DEFAULT_RSS_BASES",
+    "build_conversations",
+    "collect_conversations",
+    "candidate_reply_lookup_ids",
+    "conversation_ids",
+    "enrich_after_cheap_sources",
+    "hydrate_empty_tweets",
+    "is_reply_start",
+    "is_selected_since",
+    "load_store",
+    "make_branch_fetcher",
+    "make_x_client",
+    "needs_official_metadata",
+    "rss_bases",
+    "select_targets",
+    "should_save_cache",
+    "target_username",
+]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,6 +150,14 @@ def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
         "--all-loaded",
         action="store_true",
         help="Select every loaded/fetched tweet on or after --since. Useful for archive-only interactive runs.",
+    )
+    build_cmd.add_argument(
+        "--replies-only",
+        action="store_true",
+        help=(
+            "Only use reply tweets as starting targets. Archive/API/dump sources need reply metadata; "
+            "unofficial reply feeds are treated as reply candidates."
+        ),
     )
     build_cmd.add_argument("--since", help="Only select user tweets on or after this date, e.g. 2024-01-01.")
     build_cmd.add_argument(
@@ -211,119 +261,6 @@ def build(args: argparse.Namespace) -> int:
     return 0
 
 
-def collect_conversations(
-    args: argparse.Namespace,
-    *,
-    base_store: TweetStore | None = None,
-    base_warnings: list[str] | None = None,
-) -> BuildResult:
-    since = parse_since(args.since)
-    input_values = collect_input_values(args.items, args.input_file)
-    target_ids = extract_tweet_ids(input_values)
-    url_by_id = extract_tweet_url_map(input_values)
-    target_user = target_username(args)
-    cheap_first = bool(args.cheap_first or args.target_user)
-    use_oembed = bool((args.oembed or args.target_user) and not args.no_oembed)
-    use_unofficial = bool((args.unofficial_rss or args.target_user) and not args.no_unofficial_rss)
-
-    if base_store is None:
-        store, warnings = load_store(args)
-    else:
-        store = base_store
-        warnings = list(base_warnings or [])
-    x_client = make_x_client(args)
-
-    if args.target_user:
-        warnings.append(
-            "Target-user mode is cheap-first: local/cache and unofficial RSS are tried before any X API calls."
-        )
-
-    if use_unofficial:
-        if not target_user:
-            raise RuntimeError("--unofficial-rss requires --for-user or --target-user")
-        fetch_unofficial_timelines(store, warnings, args, target_user, since)
-
-    if target_user or args.author_id or args.all_loaded:
-        target_ids = select_targets(
-            store,
-            target_ids,
-            target_user,
-            args.author_id,
-            since,
-            all_loaded=args.all_loaded,
-        )
-
-    if args.fetch_user_timeline:
-        if not target_user:
-            raise RuntimeError("--fetch-user-timeline requires --for-user or --target-user")
-        if x_client is None:
-            raise RuntimeError("--fetch-user-timeline requires --fetch or --bearer-token")
-        if cheap_first or use_unofficial:
-            warnings.append("Using X API user timeline only after cheap/local timeline sources have finished.")
-        user = x_client.get_user_by_username(target_user)
-        timeline = x_client.get_user_posts(
-            str(user["id"]),
-            start_time=since,
-            max_pages=args.max_user_pages,
-        )
-        store.add_many(timeline.tweets, cacheable=True)
-        warnings.extend(f"Could not fetch tweet {tweet_id}: {message}" for tweet_id, message in timeline.errors.items())
-
-    if target_user or args.author_id or args.all_loaded:
-        target_ids = select_targets(
-            store,
-            target_ids,
-            target_user,
-            args.author_id,
-            since,
-            all_loaded=args.all_loaded,
-        )
-
-    if not target_ids:
-        message = "No tweet IDs matched the requested input/user/date range"
-        if target_user and not args.fetch_user_timeline:
-            message += "; use --fetch-user-timeline with a bearer token to try X API after cheap sources"
-        if getattr(args, "allow_empty", False):
-            warnings.append(message)
-            return BuildResult(
-                store=store,
-                conversations=[],
-                warnings=warnings,
-                target_ids=[],
-                should_save_cache=should_save_cache(args, x_client, oembed=None, use_unofficial=use_unofficial),
-            )
-        raise RuntimeError(message)
-
-    oembed = OEmbedClient(url_by_id=url_by_id, tweet_lookup=store.get) if use_oembed else None
-
-    if x_client is not None and args.fetch and cheap_first:
-        warnings.extend(enrich_after_cheap_sources(store, x_client, target_ids))
-
-    branch_fetcher = make_branch_fetcher(oembed=oembed, x_client=x_client, cheap_first=cheap_first)
-
-    builder = ConversationBuilder(
-        store,
-        fetcher=branch_fetcher,
-        include_quotes=not args.no_quotes,
-        strict=args.strict,
-        max_depth=args.max_depth,
-    )
-    conversations = builder.build(target_ids)
-
-    if oembed is not None:
-        ids_to_hydrate = {tweet.id for tweet in store.all()} if args.hydrate_all else conversation_ids(conversations)
-        warnings.extend(hydrate_empty_tweets(store, oembed, ids_to_hydrate))
-
-    warnings.extend(builder.warnings)
-    return BuildResult(
-        store=store,
-        conversations=conversations,
-        warnings=warnings,
-        target_ids=target_ids,
-        should_save_cache=should_save_cache(args, x_client, oembed=oembed, use_unofficial=use_unofficial),
-    )
-
-
 def interactive(args: argparse.Namespace) -> int:
     print("ariadne interactive")
     print("Cheap sources are tried first. X API is offered only after a summary.")
@@ -365,9 +302,9 @@ def interactive(args: argparse.Namespace) -> int:
         rss_bases = parse_csv_values(bases) or list(DEFAULT_RSS_BASES)
         templates = prompt("Extra RSS URL templates with {username}, comma-separated")
         rss_templates = parse_csv_values(templates)
+    replies_only = prompt_yes_no("Use only reply tweets as starting targets?", default=False)
 
-    cheap_args = argparse.Namespace(
-        command="build",
+    cheap_args = BuildOptions(
         items=[],
         input_file=[],
         archive=[archive] if archive and not _is_generic_tweet_file(archive) else [],
@@ -376,6 +313,7 @@ def interactive(args: argparse.Namespace) -> int:
         target_user=username or None,
         author_id=None,
         all_loaded=all_loaded,
+        replies_only=replies_only,
         since=since or None,
         cheap_first=True,
         oembed=use_oembed,
@@ -399,7 +337,7 @@ def interactive(args: argparse.Namespace) -> int:
         allow_empty=True,
     )
 
-    cheap_result = collect_conversations(cheap_args)
+    cheap_result = build_conversations(cheap_args)
     print_interactive_summary("Cheap-source pass", cheap_result)
     if cheap_result.should_save_cache:
         save_cache(args.cache, cheap_result.store.cacheable_tweets())
@@ -424,15 +362,17 @@ def interactive(args: argparse.Namespace) -> int:
                 if fetch_timeline:
                     pages = prompt("Max X timeline pages, 100 tweets/page")
                     max_user_pages = positive_int(pages) if pages else None
-            paid_args = argparse.Namespace(**vars(cheap_args))
-            paid_args.fetch = True
-            paid_args.fetch_user_timeline = fetch_timeline
-            paid_args.bearer_token = token
-            paid_args.max_user_pages = max_user_pages
-            paid_args.unofficial_rss = False
-            paid_args.no_unofficial_rss = True
-            paid_args.allow_empty = False
-            final_result = collect_conversations(paid_args, base_store=cheap_result.store)
+            paid_args = replace(
+                cheap_args,
+                fetch=True,
+                fetch_user_timeline=fetch_timeline,
+                bearer_token=token,
+                max_user_pages=max_user_pages,
+                unofficial_rss=False,
+                no_unofficial_rss=True,
+                allow_empty=False,
+            )
+            final_result = build_conversations(paid_args, base_store=cheap_result.store)
             print_interactive_summary("After X API pass", final_result)
         else:
             print("Skipping X API because no bearer token was provided.")
@@ -453,173 +393,6 @@ def interactive(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(rendered)
     return 0
-
-
-def collect_input_values(items: list[str], input_files: list[str]) -> list[str]:
-    values = list(items)
-    for input_file in input_files:
-        values.append(Path(input_file).expanduser().read_text(encoding="utf-8"))
-    return values
-
-
-def load_store(args: argparse.Namespace) -> tuple[TweetStore, list[str]]:
-    store = TweetStore()
-    warnings: list[str] = []
-    if not args.no_cache:
-        store.add_many(load_cache(args.cache), cacheable=True)
-
-    for archive_path in args.archive:
-        result = load_archive(archive_path)
-        store.add_many(result.tweets)
-        warnings.extend(result.warnings)
-
-    for tweets_path in args.tweets_file:
-        result = load_tweets_file(tweets_path)
-        store.add_many(result.tweets)
-        warnings.extend(result.warnings)
-    return store, warnings
-
-
-def make_x_client(args: argparse.Namespace) -> XApiClient | None:
-    token = args.bearer_token or os.environ.get("X_BEARER_TOKEN") or os.environ.get("TWITTER_BEARER_TOKEN")
-    if not token:
-        if args.fetch:
-            raise RuntimeError("--fetch requires --bearer-token, X_BEARER_TOKEN, or TWITTER_BEARER_TOKEN")
-        return None
-    if args.fetch or args.fetch_user_timeline:
-        return XApiClient(token)
-    return None
-
-
-class CheapFirstFetcher:
-    def __init__(self, cheap_fetcher, paid_fetcher) -> None:
-        self.cheap_fetcher = cheap_fetcher
-        self.paid_fetcher = paid_fetcher
-
-    def get_posts(self, ids: list[str]) -> FetchResult:
-        result = FetchResult()
-        cheap = self.cheap_fetcher.get_posts(ids)
-        result.tweets.extend(cheap.tweets)
-        result.errors.update(cheap.errors)
-
-        cheap_by_id = {tweet.id: tweet for tweet in cheap.tweets if tweet.available}
-        missing_ids = [
-            tweet_id
-            for tweet_id in unique_preserve_order(ids)
-            if tweet_id not in cheap_by_id or needs_official_metadata(cheap_by_id[tweet_id])
-        ]
-        if not missing_ids:
-            return result
-
-        paid = self.paid_fetcher.get_posts(missing_ids)
-        result.tweets.extend(paid.tweets)
-        result.errors.update(paid.errors)
-        for tweet in paid.tweets:
-            result.errors.pop(tweet.id, None)
-        return result
-
-
-def make_branch_fetcher(*, oembed: OEmbedClient | None, x_client: XApiClient | None, cheap_first: bool):
-    if oembed is not None and x_client is not None and cheap_first:
-        return CheapFirstFetcher(oembed, x_client)
-    return x_client if x_client is not None else oembed
-
-
-def target_username(args: argparse.Namespace) -> str | None:
-    target = (args.target_user or args.for_user or "").strip().strip("@")
-    return target or None
-
-
-def select_targets(
-    store: TweetStore,
-    existing_ids: list[str],
-    username: str | None,
-    author_id: str | None,
-    since,
-    *,
-    all_loaded: bool = False,
-) -> list[str]:
-    if all_loaded:
-        selected_ids = [
-            tweet.id
-            for tweet in store.all()
-            if tweet.available and is_selected_since(tweet, since)
-        ]
-    else:
-        selected_ids = select_user_tweet_ids(
-            store.all(),
-            username=username,
-            author_id=author_id,
-            since=since,
-        )
-    return unique_preserve_order(
-        existing_ids + selected_ids
-    )
-
-
-def fetch_unofficial_timelines(
-    store: TweetStore,
-    warnings: list[str],
-    args: argparse.Namespace,
-    username: str,
-    since,
-) -> None:
-    for base_url in rss_bases(args):
-        rss = NitterRssClient(base_url=base_url)
-        rss_result = rss.get_user_posts(username, since=since)
-        store.add_many(rss_result.tweets, cacheable=True)
-        warnings.extend(rss_result.warnings)
-    for template in args.rss_url_template or []:
-        rss = NitterRssClient(url_template=template)
-        rss_result = rss.get_user_posts(username, since=since)
-        store.add_many(rss_result.tweets, cacheable=True)
-        warnings.extend(rss_result.warnings)
-
-
-def rss_bases(args: argparse.Namespace) -> list[str]:
-    values = args.rss_base
-    if values is None:
-        return list(DEFAULT_RSS_BASES if args.target_user else ("https://nitter.net",))
-    if isinstance(values, str):
-        values = [values]
-    return parse_csv_values(",".join(values)) or list(DEFAULT_RSS_BASES)
-
-
-def enrich_after_cheap_sources(store: TweetStore, x_client: XApiClient, target_ids: list[str]) -> list[str]:
-    ids_to_enrich = [
-        tweet_id
-        for tweet_id in unique_preserve_order(target_ids)
-        if (tweet := store.get(tweet_id)) is not None and needs_official_metadata(tweet)
-    ]
-    if not ids_to_enrich:
-        return []
-    result = x_client.get_posts(ids_to_enrich)
-    store.add_many(result.tweets, cacheable=True)
-    warnings = [
-        f"Using X API lookup after cheap sources to enrich {len(ids_to_enrich)} selected tweet(s) with reply/quote metadata."
-    ]
-    warnings.extend(f"Could not fetch tweet {tweet_id}: {message}" for tweet_id, message in result.errors.items())
-    return warnings
-
-
-def needs_official_metadata(tweet: Tweet) -> bool:
-    source = tweet.source or ""
-    if not tweet.available:
-        return True
-    if tweet.referenced_tweets or tweet.in_reply_to_id:
-        return False
-    cheap_metadata_sources = ("oembed", "unofficial-rss:", "reply-reference")
-    return any(part in source for part in cheap_metadata_sources)
-
-
-def should_save_cache(
-    args: argparse.Namespace,
-    x_client: XApiClient | None,
-    *,
-    oembed: OEmbedClient | None,
-    use_unofficial: bool,
-) -> bool:
-    return not args.no_cache and (x_client is not None or oembed is not None or use_unofficial)
 
 
 def emit_warnings(warnings: list[str]) -> None:
@@ -699,30 +472,6 @@ def infer_archive_username(path: str) -> str:
     except (FileNotFoundError, ValueError):
         return ""
     return str(account.get("username") or "").strip().strip("@")
-
-
-def is_selected_since(tweet: Tweet, since) -> bool:
-    return is_on_or_after(tweet.created_at, since)
-
-
-def conversation_ids(conversations) -> set[str]:
-    ids: set[str] = set()
-    for conversation in conversations:
-        ids.update(conversation.all_ids)
-    return ids
-
-
-def hydrate_empty_tweets(store: TweetStore, oembed: OEmbedClient, ids: set[str]) -> list[str]:
-    empty_ids = []
-    for tweet_id in sorted(ids):
-        tweet = store.get(tweet_id)
-        if tweet and tweet.available and not tweet.text:
-            empty_ids.append(tweet_id)
-    if not empty_ids:
-        return []
-    result = oembed.get_posts(empty_ids)
-    store.add_many(result.tweets, cacheable=True)
-    return [f"Could not hydrate tweet {tweet_id} via oEmbed: {message}" for tweet_id, message in result.errors.items()]
 
 
 def inspect_archive(args: argparse.Namespace) -> int:

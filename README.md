@@ -112,6 +112,16 @@ ariadne \
   --output data/alice-cheap-pass.jsonl
 ```
 
+Only start from replies:
+
+```bash
+ariadne \
+  --target-user alice \
+  --replies-only \
+  --since 2024-01-01 \
+  --format raft
+```
+
 Arbitrary public target, but allow paid X API only after RSS/oEmbed/cache have
 been tried:
 
@@ -152,6 +162,7 @@ ariadne inspect-archive ~/Downloads/twitter-archive.zip
 
 - This is alpha software. It is designed to be clear about source quality and failure modes, not to promise complete reconstruction from incomplete public data.
 - `--target-user` is the convenience mode for arbitrary public accounts. It uses local cache/archive data, unofficial RSS, and oEmbed before any X API reads. Add `--fetch --fetch-user-timeline` only when you are ready to spend official API reads.
+- `--replies-only` only uses tweets with actual reply-parent metadata as starting targets. Archive files, generic dumps, and X API can provide that; cheap RSS/oEmbed usually cannot, so strict reply-only runs may find no starts until X API is allowed.
 - Live X API fetching is opt-in via `--fetch` and `--fetch-user-timeline`; without it, missing posts are represented as unavailable placeholders.
 - `--oembed` uses the public X oEmbed endpoint to hydrate tweet text/author/date when a canonical tweet URL is known. oEmbed does not expose reply-parent metadata, so it cannot complete a branch by itself.
 - `--unofficial-rss` tries a Nitter/XCancel-style RSS endpoint such as `https://nitter.net/{username}/rss`. `--target-user` tries both `https://nitter.net` and `https://xcancel.com` unless disabled. This is unsupported, fragile, usually limited to recent feed items, and usually omits reply-parent metadata.
@@ -193,8 +204,28 @@ ariadne inspect-archive ~/Downloads/twitter-archive.zip
 
 The first tweet in the reconstructed branch is role `assistant`; later branch posts are role `user` with participant names when available.
 
+## Python API
+
+Everything the `build` command does is callable directly, and rendering is
+available as parsed data rather than only as text:
+
+```python
+import ariadne
+
+result = ariadne.build(archive="~/twitter-archive.zip", for_user="alice")
+
+for document in result.raft_documents():   # list[dict], no file round-trip
+    print(document["metadata"]["target_id"])
+
+result.save("branches.jsonl", "raft")
+```
+
+Keyword names are the CLI flags with dashes as underscores. Full reference in
+[docs/API.md](docs/API.md).
+
 See also:
 
+- [Python API](docs/API.md)
 - [Source behavior](docs/SOURCES.md)
 - [Output schemas](docs/SCHEMA.md)
 - [Raft handoff](docs/RAFT.md)

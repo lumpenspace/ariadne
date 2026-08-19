@@ -24,6 +24,12 @@ any X API request. If `--fetch` or `--fetch-user-timeline` is enabled, X API run
 after those cheap sources and is used to backfill timeline pages, reply parents,
 quotes, and structural metadata that oEmbed/RSS cannot expose.
 
+`--replies-only` is strict: a tweet only becomes a starting target when Ariadne
+has reply-parent metadata for it. This prevents mixed RSS feeds from silently
+seeding top-level posts. When cheap sources return only text and IDs, Ariadne can
+use those IDs as candidates, but X API or a richer dump is needed to prove which
+ones are replies.
+
 Interactive mode follows the same policy: it asks for a username and/or archive
 plus a date, runs the cheap-source pass, prints a summary of tweets,
 conversations, unavailable output tweets, warnings, and sources, then asks
