@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
+from . import hx
 from .api import (
     DEFAULT_RSS_BASES,
     BuildOptions,
@@ -262,9 +263,8 @@ def build(args: argparse.Namespace) -> int:
 
 
 def interactive(args: argparse.Namespace) -> int:
-    print("ariadne interactive")
-    print("Cheap sources are tried first. X API is offered only after a summary.")
-    print("")
+    hx.banner("reconstruct reply branches interactively")
+    hx.say("cheap sources are tried first; X API is offered only after a summary")
 
     archive = prompt_existing_path("Archive/dump path first (zip/folder/tweets.js/json/csv/jsonl)")
     tweets_file = ""
@@ -375,11 +375,11 @@ def interactive(args: argparse.Namespace) -> int:
             final_result = build_conversations(paid_args, base_store=cheap_result.store)
             print_interactive_summary("After X API pass", final_result)
         else:
-            print("Skipping X API because no bearer token was provided.")
+            hx.warn("skipping X API because no bearer token was provided")
 
     if not final_result.conversations:
         emit_warnings(final_result.warnings)
-        print("No conversations were reconstructed.")
+        hx.warn("no conversations were reconstructed")
         return 0
 
     emit_warnings(final_result.warnings)
@@ -389,7 +389,7 @@ def interactive(args: argparse.Namespace) -> int:
     rendered = render(final_result.conversations, final_result.store, output_format=output_format)
     if output:
         Path(output).expanduser().write_text(rendered, encoding="utf-8")
-        print(f"Wrote {output}")
+        hx.ok(f"wrote {_lit(output)}")
     else:
         sys.stdout.write(rendered)
     return 0
@@ -397,28 +397,25 @@ def interactive(args: argparse.Namespace) -> int:
 
 def emit_warnings(warnings: list[str]) -> None:
     for warning in unique_preserve_order(warnings):
-        print(f"warning: {warning}", file=sys.stderr)
+        hx.warn(_lit(warning))
 
 
 def print_interactive_summary(label: str, result: BuildResult) -> None:
-    print("")
-    print(label)
-    print("-" * len(label))
-    print(f"Tweets in store: {len(result.store.all())}")
-    print(f"Selected target tweets: {len(result.target_ids)}")
-    print(f"Reconstructed conversations: {len(result.conversations)}")
-    print(f"Unavailable tweets in reconstructed output: {len(unavailable_conversation_ids(result))}")
-    print(f"Warnings: {len(unique_preserve_order(result.warnings))}")
+    hx.step(_lit(label))
+    hx.say(f"tweets in store: {len(result.store.all())}")
+    hx.say(f"selected target tweets: {len(result.target_ids)}")
+    hx.say(f"reconstructed conversations: {len(result.conversations)}")
+    hx.say(f"unavailable tweets in reconstructed output: {len(unavailable_conversation_ids(result))}")
+    hx.say(f"warnings: {len(unique_preserve_order(result.warnings))}")
     counts = source_counts(result.store.all())
     if counts:
-        print("Sources:")
+        hx.say("sources:")
         for source, count in counts.most_common():
-            print(f"  {source}: {count}")
+            hx.say(f"  {_lit(source)}: {count}")
     if result.warnings:
-        print("Recent warnings:")
+        hx.say("recent warnings:")
         for warning in unique_preserve_order(result.warnings)[-5:]:
-            print(f"  - {warning}")
-    print("")
+            hx.say(f"  - {_lit(warning)}")
 
 
 def source_counts(tweets: list[Tweet]) -> Counter[str]:
@@ -489,17 +486,31 @@ def inspect_archive(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lit(text: str) -> str:
+    """Escape `text` so rich prints it literally; a no-op in plain mode."""
+    return text.replace("[", "\\[") if hx.console() is not None else text
+
+
+def _read_value(label: str, default: str | None = None) -> str:
+    """Read one line behind the hyperplex `»` marker, with a dim [default] hint."""
+    console = hx.console()
+    if console is None:
+        plain_suffix = f" [{default}]" if default else ""
+        return input(f"> {label}{plain_suffix} ").strip()
+    suffix = f" [dim]\\[{_lit(default)}][/]" if default else ""
+    return console.input(f"[bold {hx.ACCENT}]»[/] {_lit(label)}{suffix} ").strip()
+
+
 def prompt(label: str, *, default: str | None = None, required: bool = False) -> str:
-    suffix = f" [{default}]" if default else ""
     while True:
-        value = input(f"{label}{suffix}: ").strip()
+        value = _read_value(label, default)
         if value:
             return value
         if default is not None:
             return default
         if not required:
             return ""
-        print("Please enter a value.")
+        hx.warn("please enter a value")
 
 
 def prompt_path(label: str) -> str:
@@ -515,36 +526,30 @@ def prompt_existing_path(label: str) -> str:
         path = Path(value).expanduser()
         if path.exists():
             return str(path)
-        print(f"Path not found: {path}")
-        print("Press Enter to skip this source, or enter an existing file/folder path.")
+        hx.warn(f"path not found: {_lit(str(path))}")
+        hx.say("press Enter to skip this source, or enter an existing file/folder path")
 
 
 def prompt_choice(label: str, choices: tuple[str, ...], *, default: str) -> str:
-    choice_text = "/".join(choices)
-    while True:
-        value = prompt(f"{label} ({choice_text})", default=default)
-        if value in choices:
-            return value
-        print(f"Choose one of: {choice_text}")
+    """Pick one of `choices`. hyperplex renders them numbered; the value is still the choice string."""
+    options = list(choices)
+    default_index = options.index(default) if default in options else None
+    return options[hx.choose(_lit(label), options, default=default_index)]
 
 
 def prompt_yes_no(label: str, *, default: bool) -> bool:
-    default_text = "Y/n" if default else "y/N"
-    while True:
-        value = prompt(f"{label} [{default_text}]").lower()
-        if not value:
-            return default
-        if value in {"y", "yes"}:
-            return True
-        if value in {"n", "no"}:
-            return False
-        print("Please answer y or n.")
+    return hx.confirm(_lit(label), default)
 
 
 def prompt_secret(label: str) -> str:
+    console = hx.console()
+    if console is None:
+        print(f"> {label}", file=sys.stderr)
+    else:
+        console.print(f"[bold {hx.ACCENT}]»[/] {_lit(label)}")
     if sys.stdin.isatty():
-        return getpass.getpass(label + ": ").strip()
-    return input(label + ": ").strip()
+        return getpass.getpass("> ").strip()
+    return input("> ").strip()
 
 
 def parse_csv_values(value: str) -> list[str]:
