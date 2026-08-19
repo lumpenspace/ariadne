@@ -18,7 +18,7 @@ TOOL = "ariadne"
 SIGIL = "⌇"
 ACCENT = "#fbbf24"
 
-VIOLET = "#a78bfa"
+CHROME = "#4d7cff"  # hyperplex.org accent
 MARK = "⟡"
 
 
@@ -50,16 +50,16 @@ def console():
 
 
 def banner(tagline: str = "") -> None:
-    """`{sigil} {tool} · ⟡ hyperplex` over a thin violet rule."""
+    """`{sigil} {tool} · ⟡ hyperplex` over a thin chrome rule."""
     c = console()
     if c is None:
         print(f"{TOOL} — hyperplex", file=sys.stderr)
         return
-    line = f"[bold {ACCENT}]{SIGIL} {TOOL}[/]  [dim]·[/]  [{VIOLET}]{MARK} hyperplex[/]"
+    line = f"[bold {ACCENT}]{SIGIL} {TOOL}[/]  [dim]·[/]  [{CHROME}]{MARK} hyperplex[/]"
     if tagline:
         line += f"  [dim]· {tagline}[/]"
     c.print(line)
-    c.print(f"[{VIOLET}]{'─' * min(46, c.width)}[/]")
+    c.print(f"[{CHROME}]{'─' * min(46, c.width)}[/]")
 
 
 def step(message: str) -> None:
