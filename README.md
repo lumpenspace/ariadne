@@ -6,6 +6,14 @@ It can read an X/Twitter archive export (`data/tweets*.js` / `data/account.js` i
 
 ## Install
 
+ariadne is not on PyPI — the name belongs to the GraphQL library — so install from git:
+
+```bash
+pip install git+https://github.com/lumpenspace/ariadne
+```
+
+or, from a checkout:
+
 ```bash
 python3 -m pip install -e .
 ```
