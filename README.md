@@ -232,7 +232,10 @@ See also:
 
 ## Development
 
+[uv](https://docs.astral.sh/uv/) manages the environment:
+
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q src tests
+uv sync --extra dev
+uv run pytest
+uv run ruff check .
 ```

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ariadne"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Reconstruct reply branches from X/Twitter archives or IDs and render them as LLM chat inputs."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,5 +33,23 @@ Issues = "https://github.com/lumpenspace/ariadne/issues"
 [project.scripts]
 ariadne = "ariadne.cli:main"
 
+[project.optional-dependencies]
+dev = ["build>=1.2", "pytest>=8.0", "ruff>=0.8"]
+
+[tool.hatch.version]
+path = "src/ariadne/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ariadne"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+# Pinned explicitly rather than inherited, mirroring opbdh: ruff's default
+# rule set changes between releases, and `ruff>=0.8` means CI can install any
+# of them. These are ruff's pre-0.16 defaults.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
