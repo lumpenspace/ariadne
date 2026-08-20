@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import re
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,16 +44,22 @@ class NitterRssClient:
             "RSS timeline fallback usually returns only the latest feed page; older posts may be unavailable even when --since is older.",
         ]
         try:
-            payload = self._request(username)
+            payload = self._request_with_retry(username)
+            if _looks_like_html(payload):
+                return UnofficialTimelineResult(
+                    warnings=warnings
+                    + [
+                        f"Unofficial RSS source {source_label} answered with an HTML page instead of a feed "
+                        "(likely a bot challenge). Other sources continue; a different --rss-base may work."
+                    ]
+                )
             tweets = tweets_from_nitter_rss(payload, username=username, source=f"unofficial-rss:{source_label}")
         except urllib.error.HTTPError as exc:
             return UnofficialTimelineResult(
                 warnings=warnings + [f"Unofficial RSS request failed with HTTP {exc.code} from {source_label}"]
             )
         except (urllib.error.URLError, TimeoutError) as exc:
-            return UnofficialTimelineResult(
-                warnings=warnings + [f"Unofficial RSS request failed from {source_label}: {exc}"]
-            )
+            return UnofficialTimelineResult(warnings=warnings + [_network_warning(source_label, exc)])
         except ET.ParseError as exc:
             return UnofficialTimelineResult(
                 warnings=warnings + [f"Unofficial RSS response from {source_label} was not parseable XML: {exc}"]
@@ -65,6 +73,14 @@ class NitterRssClient:
     def as_fetch_result(self, username: str, *, since=None) -> FetchResult:
         result = self.get_user_posts(username, since=since)
         return FetchResult(tweets=result.tweets)
+
+    def _request_with_retry(self, username: str) -> bytes:
+        # One retry absorbs flaky instances; deterministic blocks fail fast twice.
+        try:
+            return self._request(username)
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(0.7)
+            return self._request(username)
 
     def _request(self, username: str) -> bytes:
         url = self._feed_url(username)
@@ -83,6 +99,22 @@ class NitterRssClient:
         if self.url_template:
             return self.url_template.format(username=quoted, raw_username=username)
         return f"{self.base_url}/{quoted}/rss"
+
+
+def _looks_like_html(payload: bytes) -> bool:
+    head = payload.lstrip()[:64].lower()
+    return head.startswith((b"<!doctype", b"<html"))
+
+
+def _network_warning(source_label: str, exc: Exception) -> str:
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, ssl.SSLEOFError) or "UNEXPECTED_EOF" in str(exc):
+        return (
+            f"Unofficial RSS source {source_label} closed the TLS handshake: it likely blocks "
+            "non-browser clients or is down. This is not a problem with your network or setup; "
+            "other sources continue, and a different --rss-base may work."
+        )
+    return f"Unofficial RSS request failed from {source_label}: {exc}"
 
 
 def tweets_from_nitter_rss(payload: bytes | str, *, username: str, source: str) -> list[Tweet]:

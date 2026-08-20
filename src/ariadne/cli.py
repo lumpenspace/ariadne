@@ -206,7 +206,7 @@ def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
         action="append",
         help=(
             "Base URL for Nitter/XCancel-style RSS. Can be repeated. "
-            "Default with --target-user: https://nitter.net and https://xcancel.com."
+            "Default with --target-user: https://nitter.net and https://rss.xcancel.com."
         ),
     )
     build_cmd.add_argument(

@@ -47,7 +47,7 @@ __all__ = [
     "DEFAULT_RSS_BASES",
 ]
 
-DEFAULT_RSS_BASES = ("https://nitter.net", "https://xcancel.com")
+DEFAULT_RSS_BASES = ("https://nitter.net", "https://rss.xcancel.com")
 
 DEFAULT_CACHE_PATH = ".ariadne-cache.json"
 

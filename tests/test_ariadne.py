@@ -448,5 +448,56 @@ class AriadneTests(unittest.TestCase):
         self.assertEqual(conversations[0].path, ["1001", "1002"])
 
 
+
+class UnofficialRssFailureTests(unittest.TestCase):
+    RSS = (
+        b"<?xml version='1.0'?><rss><channel><title>alice / @alice</title>"
+        b"<item><guid>https://x.com/alice/status/12345678901</guid>"
+        b"<title>hi</title><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>"
+        b"</channel></rss>"
+    )
+
+    def client_with(self, request_impl):
+        client = NitterRssClient(base_url="https://example.invalid")
+        client._request = request_impl
+        return client
+
+    def test_one_retry_absorbs_a_transient_failure(self):
+        import urllib.error
+
+        calls = []
+
+        def flaky(username):
+            calls.append(username)
+            if len(calls) == 1:
+                raise urllib.error.URLError("connection reset")
+            return self.RSS
+
+        result = self.client_with(flaky).get_user_posts("alice")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([tweet.id for tweet in result.tweets], ["12345678901"])
+
+    def test_tls_eof_is_explained_as_a_blocked_instance(self):
+        import ssl
+        import urllib.error
+
+        def blocked(username):
+            raise urllib.error.URLError(ssl.SSLEOFError("EOF occurred in violation of protocol"))
+
+        result = self.client_with(blocked).get_user_posts("alice")
+        self.assertEqual(result.tweets, [])
+        blurb = " ".join(result.warnings)
+        self.assertIn("blocks non-browser clients", blurb)
+        self.assertIn("not a problem with your network", blurb)
+
+    def test_html_challenge_page_is_named_not_parse_errored(self):
+        def challenged(username):
+            return b"<!doctype html><html><head><title>Making sure...</title></head></html>"
+
+        result = self.client_with(challenged).get_user_posts("alice")
+        self.assertEqual(result.tweets, [])
+        self.assertIn("bot challenge", " ".join(result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()
