@@ -134,8 +134,18 @@ Named failures derive from `AriadneError`, including `ConfigurationError`,
 | `raft` | one JSON object per line | retrieval, chunking, and embedding |
 
 The `openai` renderer keeps Ariadne's conversation envelope; consumers extract
-`conversations[i].messages`. Role names describe position in the branch, not the
-speaker's intent.
+`conversations[i].messages`. Roles follow authorship: the collected user's
+tweets speak as `assistant`, everyone else's as `user` (`participant` in the
+raft format) — even when a conversation's own tweets can't tell, because the
+build knows who was collected. In `markdown`, consecutive tweets by the same
+person merge into one message: one role header, the metadata of every tweet in
+the run, then the texts separated by `---` rules.
+
+Pass `--responses-only` (API: `responses_only=True`) to keep only
+conversations in which the subject actually responds — replies to or
+quote-tweets someone else. Standalone tweets and pure self-threads are
+dropped; a reply to a deleted tweet counts as a response, since the missing
+parent was somebody. `ariadne interactive` asks the same question.
 
 [Inspect the schemas →](docs/SCHEMA.md)
 
@@ -163,6 +173,25 @@ ariadne build --help
 # Bluesky uses its public API and the same renderers.
 ariadne bluesky alice.bsky.social --since 2024-01-01 --format raft
 ```
+
+## Picking up where a build left off
+
+Every build that fetches anything writes a cache (`.ariadne-cache.json` by
+default) — and since 0.6 it also records the tweet ids it could *not*
+resolve, so the holes survive the session:
+
+```bash
+ariadne cache list                 # what each cache holds, and what is still missing
+ariadne cache missing              # the missing ids, one per line
+ariadne cache retry                # fetch them now, updating the cache in place
+```
+
+`cache retry` (API: `ariadne.retry_cache()`) tries local dumps and free
+oEmbed by default; add `--community-archive`, `--twitterapi-key`, or
+`--fetch` with an X API token for the stubborn ones, and `--limit` to bound
+a run. Re-running the original `ariadne build` afterwards picks the
+recovered tweets up from the cache. The cache write is last-writer-wins, so
+retry after a build using the same cache has finished, not alongside it.
 
 ## Reference
 

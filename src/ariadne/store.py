@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
+from typing import Any
 
+from .ids import unique_preserve_order
 from .models import Tweet, TweetRef
 
 
@@ -84,16 +87,114 @@ def load_cache(path: str | Path) -> list[Tweet]:
     return [Tweet.from_dict(row) for row in rows if isinstance(row, dict) and row.get("id")]
 
 
-def save_cache(path: str | Path, tweets: list[Tweet]) -> None:
+def save_cache(
+    path: str | Path, tweets: list[Tweet], *, missing: list[str] | None = None
+) -> None:
+    """Persist available tweets, and optionally the ids a build could not get.
+
+    The cache itself only holds *fetched* tweets, so the reply/quote edges
+    pointing at unresolved parents mostly live in archives and dumps that are
+    not cached; recording `missing` here is what lets a later session retry
+    them from the cache file alone. When `missing` is None the previously
+    recorded list is preserved.
+    """
     cache_path = Path(path).expanduser()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if missing is None:
+        missing = load_missing_ids(cache_path)
     payload = {
         "version": 1,
+        "missing": sorted(set(missing)),
         "tweets": [tweet.to_dict(include_raw=True) for tweet in tweets if tweet.available],
     }
     tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp_path.replace(cache_path)
+
+
+def load_missing_ids(path: str | Path) -> list[str]:
+    """The unresolved tweet ids a previous build recorded in this cache."""
+    cache_path = Path(path).expanduser()
+    if not cache_path.exists():
+        return []
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return []
+    return [str(value) for value in payload.get("missing", []) if str(value).strip()]
+
+
+def empty_tweet_ids(tweets: list[Tweet]) -> list[str]:
+    """Ids present in the set but carrying no text (stubs and tombstones)."""
+    return [tweet.id for tweet in tweets if not tweet.text or not tweet.available]
+
+
+def missing_referenced_ids(tweets: list[Tweet]) -> list[str]:
+    """Ids referenced by reply/quote edges but absent from the set.
+
+    These are the holes a build left behind: reply parents and quoted
+    tweets that no source could produce at the time.
+    """
+    present = {tweet.id for tweet in tweets}
+    wanted: list[str] = []
+    for tweet in tweets:
+        for ref_id in [tweet.reply_parent_id(), *tweet.quote_ids()]:
+            if ref_id and ref_id not in present:
+                wanted.append(ref_id)
+    return unique_preserve_order(wanted)
+
+
+def cache_retry_ids(
+    tweets: list[Tweet], *, recorded_missing: list[str] | None = None
+) -> list[str]:
+    """Everything a later session could try to fetch again for this cache.
+
+    Combines the ids a build recorded as unresolved (minus any resolved
+    since), the reply/quote references absent from the cached set, and the
+    cached stubs that still have no text.
+    """
+    resolved = {tweet.id for tweet in tweets if tweet.available and tweet.text}
+    recorded = [
+        tweet_id for tweet_id in (recorded_missing or []) if tweet_id not in resolved
+    ]
+    return unique_preserve_order(
+        recorded + missing_referenced_ids(tweets) + empty_tweet_ids(tweets)
+    )
+
+
+def cache_summary(path: str | Path) -> dict[str, Any] | None:
+    """Summarize one cache file, or None when it does not exist.
+
+    Keys: path, bytes, tweets, with_text, empty, missing, first, last,
+    authors (Counter.most_common list), sources (same).
+    """
+    cache_path = Path(path).expanduser()
+    if not cache_path.exists():
+        return None
+    tweets = load_cache(cache_path)
+    empty = set(empty_tweet_ids(tweets))
+    retryable = cache_retry_ids(tweets, recorded_missing=load_missing_ids(cache_path))
+    dates = sorted(tweet.created_at for tweet in tweets if tweet.created_at)
+    authors: Counter[str] = Counter(
+        f"@{tweet.username}" for tweet in tweets if tweet.username
+    )
+    sources: Counter[str] = Counter()
+    for tweet in tweets:
+        for part in (tweet.source or "").split(","):
+            part = part.strip()
+            if part:
+                sources[part] += 1
+    return {
+        "path": str(cache_path),
+        "bytes": cache_path.stat().st_size,
+        "tweets": len(tweets),
+        "with_text": sum(1 for tweet in tweets if tweet.available and tweet.text),
+        "empty": len(empty),
+        "missing": len([tweet_id for tweet_id in retryable if tweet_id not in empty]),
+        "first": dates[0] if dates else "",
+        "last": dates[-1] if dates else "",
+        "authors": authors.most_common(5),
+        "sources": sources.most_common(5),
+    }
 
 
 def _prefer(first: str | None, second: str | None) -> str | None:

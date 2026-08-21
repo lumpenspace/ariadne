@@ -135,7 +135,7 @@ class Conversation:
 def missing_tweet(tweet_id: str, *, source: str | None = None) -> Tweet:
     return Tweet(
         id=tweet_id,
-        text=f"[unavailable tweet {tweet_id}]",
+        text="[deleted]",
         source=source,
         available=False,
     )

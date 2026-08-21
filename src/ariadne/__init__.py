@@ -14,10 +14,13 @@ from .api import (
     BuildKwargs,
     BuildOptions,
     BuildResult,
+    CacheRetryResult,
     OutputFormat,
     PathInput,
     build,
     build_conversations,
+    conversation_has_response,
+    retry_cache,
 )
 from .archive import load_archive
 from .bluesky import build_bluesky
@@ -47,6 +50,7 @@ __all__ = [
     "build",
     "build_conversations",
     "build_bluesky",
+    "conversation_has_response",
     "BuildOptions",
     "BuildResult",
     "BuildKwargs",
@@ -72,6 +76,9 @@ __all__ = [
     "load_tweets_file",
     "load_cache",
     "save_cache",
+    # Cache retry
+    "CacheRetryResult",
+    "retry_cache",
     # Local dumps
     "DumpInfo",
     "LocalDumpsClient",
@@ -86,4 +93,4 @@ __all__ = [
     "json_payload",
 ]
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"

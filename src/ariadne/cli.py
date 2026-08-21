@@ -37,10 +37,11 @@ from .fetch import XApiError
 from .ids import tweet_id_from_url, unique_preserve_order
 from .models import Tweet
 from .render import render
-from .store import save_cache
+from .store import cache_summary
+from .store import save_cache  # noqa: F401  (stays importable from ariadne.cli)
 
 
-COMMANDS = {"build", "inspect-archive", "interactive", "bluesky", "dumps"}
+COMMANDS = {"build", "inspect-archive", "interactive", "bluesky", "dumps", "cache"}
 
 # The pipeline moved to `api`; this module is now just an argparse front-end.
 # Everything below stays importable from `ariadne.cli` because it was public
@@ -94,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
             return bluesky_command(args)
         if args.command == "dumps":
             return dumps_command(args)
+        if args.command == "cache":
+            return cache_command(args)
         return build(args)
     except (
         OSError,
@@ -133,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
     bluesky_cmd.add_argument("--limit", type=positive_int, default=60, help="Recent posts to walk. Default: 60.")
     bluesky_cmd.add_argument("--no-replies", action="store_true", help="Skip the actor's replies.")
     bluesky_cmd.add_argument(
+        "--responses-only",
+        action="store_true",
+        help="Only keep conversations in which the actor responds to someone else.",
+    )
+    bluesky_cmd.add_argument(
         "--format",
         choices=("messages", "openai", "json", "markdown", "raft"),
         default="messages",
@@ -142,7 +150,80 @@ def build_parser() -> argparse.ArgumentParser:
 
     dumps_cmd = subparsers.add_parser("dumps", help="Import and explore local bulk tweet dumps.")
     add_dumps_arguments(dumps_cmd)
+
+    cache_cmd = subparsers.add_parser(
+        "cache", help="Inspect build caches and retry their missing tweets."
+    )
+    add_cache_arguments(cache_cmd)
     return parser
+
+
+def add_cache_arguments(cache_cmd: argparse.ArgumentParser) -> None:
+    actions = cache_cmd.add_subparsers(dest="cache_action", required=True)
+
+    list_cmd = actions.add_parser(
+        "list",
+        help="Summarize cache files: tweets held, span, authors, and what is still missing.",
+    )
+    list_cmd.add_argument(
+        "paths",
+        nargs="*",
+        help="Cache files to summarize. Default: .ariadne-cache.json here and in your home directory.",
+    )
+
+    missing_cmd = actions.add_parser(
+        "missing",
+        help="Print the tweet ids a cache still lacks, one per line (pipe-friendly).",
+    )
+    missing_cmd.add_argument(
+        "--cache",
+        default=".ariadne-cache.json",
+        help="Cache file to inspect. Default: .ariadne-cache.json",
+    )
+
+    retry_cmd = actions.add_parser(
+        "retry",
+        help=(
+            "Fetch a cache's missing tweets through the available sources and "
+            "update it in place. Safe to run in a later session; run it after "
+            "a build using the same cache has finished, not alongside it."
+        ),
+    )
+    retry_cmd.add_argument(
+        "--cache",
+        default=".ariadne-cache.json",
+        help="Cache file to update. Default: .ariadne-cache.json",
+    )
+    retry_cmd.add_argument(
+        "--limit", type=positive_int, help="Retry at most this many missing tweets."
+    )
+    retry_cmd.add_argument(
+        "--dump",
+        action="append",
+        default=[],
+        help="Use only this imported local dump. Can be repeated. Default: all.",
+    )
+    retry_cmd.add_argument("--no-dumps", action="store_true", help="Do not read imported local dumps.")
+    retry_cmd.add_argument(
+        "--no-oembed",
+        action="store_true",
+        help="Skip the free public oEmbed lookups (on by default).",
+    )
+    retry_cmd.add_argument(
+        "--community-archive",
+        action="store_true",
+        help="Also try the Community Archive (community-archive.org, no key).",
+    )
+    retry_cmd.add_argument(
+        "--twitterapi-key",
+        help="twitterapi.io API key (or set TWITTERAPI_IO_KEY) to use it as a source.",
+    )
+    retry_cmd.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Also use X API v2 with X_BEARER_TOKEN or --bearer-token.",
+    )
+    retry_cmd.add_argument("--bearer-token", help="X API bearer token for --fetch.")
 
 
 def add_dumps_arguments(dumps_cmd: argparse.ArgumentParser) -> None:
@@ -255,6 +336,15 @@ def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
         help=(
             "Only use reply tweets as starting targets. Archive/API/dump sources need reply metadata; "
             "unofficial reply feeds are treated as reply candidates."
+        ),
+    )
+    build_cmd.add_argument(
+        "--responses-only",
+        action="store_true",
+        help=(
+            "Only keep conversations in which the subject actually responds -- "
+            "replies to or quote-tweets someone else. Drops standalone tweets "
+            "and pure self-threads."
         ),
     )
     build_cmd.add_argument("--since", help="Only select user tweets on or after this date, e.g. 2024-01-01.")
@@ -380,6 +470,7 @@ def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
 
 
 def bluesky_command(args: argparse.Namespace) -> int:
+    from .api import conversation_has_response
     from .bluesky import build_bluesky
 
     result = build_bluesky(
@@ -388,6 +479,14 @@ def bluesky_command(args: argparse.Namespace) -> int:
         since=args.since,
         include_replies=not args.no_replies,
     )
+    if args.responses_only:
+        # subject=None: the actor may be given as a DID, but each
+        # conversation's target post is theirs, so the fallback matches.
+        result.conversations = [
+            conversation
+            for conversation in result.conversations
+            if conversation_has_response(conversation, result.store)
+        ]
     emit_warnings(result.warnings)
     output = render(result.conversations, result.store, output_format=args.format)
     if args.output:
@@ -403,9 +502,17 @@ def build(args: argparse.Namespace) -> int:
     emit_warnings(result.warnings)
 
     if result.should_save_cache:
-        save_cache(args.cache, result.store.cacheable_tweets())
+        result.save_cache(args.cache)
+        unresolved = result.unresolved_ids()
+        if unresolved:
+            hx.say(
+                f"{len(unresolved)} tweet(s) could not be resolved; retry them "
+                f"any time with: ariadne cache retry --cache {args.cache}"
+            )
 
-    output = render(result.conversations, result.store, output_format=args.format)
+    # result.render is subject-aware: the collected user stays the
+    # assistant even where a conversation's own tweets cannot tell.
+    output = result.render(args.format)
     if args.output:
         Path(args.output).expanduser().write_text(output, encoding="utf-8")
     else:
@@ -454,6 +561,32 @@ def interactive(args: argparse.Namespace) -> int:
         templates = prompt("Extra RSS URL templates with {username}, comma-separated")
         rss_templates = parse_csv_values(templates)
     replies_only = prompt_yes_no("Use only reply tweets as starting targets?", default=False)
+    responses_only = prompt_yes_no(
+        "Keep only conversations where the user responds to someone else? "
+        "Drops standalone tweets and self-threads",
+        default=True,
+    )
+
+    # A cache from earlier sessions may already hold tweets -- and a list of
+    # the ones those sessions could not get. Offer to retry them first, so
+    # anything recovered flows straight into this build.
+    summary = cache_summary(args.cache)
+    if summary and summary["tweets"]:
+        retryable = summary["missing"] + summary["empty"]
+        hx.say(
+            f"cache {args.cache}: {summary['tweets']} tweet(s) from earlier "
+            f"sessions, {retryable} still missing"
+        )
+        if retryable and prompt_yes_no(
+            "Try to fetch the missing ones again before building?", default=True
+        ):
+            from .api import retry_cache
+
+            retry = retry_cache(args.cache, oembed=use_oembed)
+            hx.ok(
+                f"recovered {len(retry.recovered)} of {len(retry.wanted)} "
+                f"missing tweet(s)"
+            )
 
     cheap_args = BuildOptions(
         items=[],
@@ -465,6 +598,7 @@ def interactive(args: argparse.Namespace) -> int:
         author_id=None,
         all_loaded=all_loaded,
         replies_only=replies_only,
+        responses_only=responses_only,
         since=since or None,
         cheap_first=True,
         oembed=use_oembed,
@@ -490,9 +624,21 @@ def interactive(args: argparse.Namespace) -> int:
 
     cheap_result = build_conversations(cheap_args)
     print_interactive_summary("Cheap-source pass", cheap_result)
-    if cheap_result.should_save_cache:
-        save_cache(args.cache, cheap_result.store.cacheable_tweets())
+    cheap_result.save_cache(args.cache)
 
+    missing_ids = unavailable_conversation_ids(cheap_result)
+    if missing_ids:
+        incomplete = sum(
+            1
+            for conversation in cheap_result.conversations
+            if conversation.all_ids & missing_ids
+        )
+        hx.say(
+            f"{len(missing_ids)} tweet(s) are missing to complete "
+            f"{incomplete} of {len(cheap_result.conversations)} conversation(s)"
+        )
+    elif cheap_result.conversations:
+        hx.say("no tweets are missing; every reconstructed conversation is complete")
     continue_default = should_continue_with_x_api(cheap_result)
     use_x_api = prompt_yes_no(
         "Continue with X API now? This may cost API reads",
@@ -534,25 +680,30 @@ def interactive(args: argparse.Namespace) -> int:
         return 0
 
     emit_warnings(final_result.warnings)
-    if final_result.should_save_cache:
-        save_cache(args.cache, final_result.store.cacheable_tweets())
+    final_result.save_cache(args.cache)
 
-    rendered = render(final_result.conversations, final_result.store, output_format=output_format)
+    rendered = final_result.render(output_format)
     if output:
         Path(output).expanduser().write_text(rendered, encoding="utf-8")
-        hx.ok(f"wrote {_lit(output)}")
+        hx.ok(f"wrote {output}")
     else:
         sys.stdout.write(rendered)
+    unresolved = final_result.unresolved_ids()
+    if unresolved:
+        hx.say(
+            f"{len(unresolved)} tweet(s) are still unresolved; retry any time "
+            f"with: ariadne cache retry --cache {args.cache}"
+        )
     return 0
 
 
 def emit_warnings(warnings: list[str]) -> None:
     for warning in unique_preserve_order(warnings):
-        hx.warn(_lit(warning))
+        hx.warn(warning)
 
 
 def print_interactive_summary(label: str, result: BuildResult) -> None:
-    hx.step(_lit(label))
+    hx.step(label)
     hx.say(f"tweets in store: {len(result.store.all())}")
     hx.say(f"selected target tweets: {len(result.target_ids)}")
     hx.say(f"reconstructed conversations: {len(result.conversations)}")
@@ -562,11 +713,11 @@ def print_interactive_summary(label: str, result: BuildResult) -> None:
     if counts:
         hx.say("sources:")
         for source, count in counts.most_common():
-            hx.say(f"  {_lit(source)}: {count}")
+            hx.say(f"  {source}: {count}")
     if result.warnings:
         hx.say("recent warnings:")
         for warning in unique_preserve_order(result.warnings)[-5:]:
-            hx.say(f"  - {_lit(warning)}")
+            hx.say(f"  - {warning}")
 
 
 def source_counts(tweets: list[Tweet]) -> Counter[str]:
@@ -637,6 +788,90 @@ def inspect_archive(args: argparse.Namespace) -> int:
     return 0
 
 
+def cache_command(args: argparse.Namespace) -> int:
+    from .api import retry_cache
+    from .store import cache_retry_ids, cache_summary, load_cache, load_missing_ids
+
+    if args.cache_action == "list":
+        candidates = [Path(p).expanduser() for p in args.paths] or [
+            path
+            for path in (Path(".ariadne-cache.json"), Path.home() / ".ariadne-cache.json")
+            if path.exists()
+        ]
+        paths, seen = [], set()
+        for path in candidates:
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                paths.append(path)
+        if not paths:
+            hx.warn("no cache files found; builds write .ariadne-cache.json unless --no-cache")
+            return 0
+        for path in paths:
+            summary = cache_summary(path)
+            if summary is None:
+                hx.warn(f"not found: {path}")
+                continue
+            print(summary["path"])
+            print(
+                f"  {summary['tweets']:,} cached tweet(s), {summary['with_text']:,} with text, "
+                f"{summary['empty']:,} empty stub(s); "
+                f"{summary['missing']:,} referenced tweet(s) missing"
+            )
+            if summary["first"]:
+                print(f"  span {summary['first'][:10]} → {summary['last'][:10]}")
+            if summary["authors"]:
+                authors = ", ".join(f"{name} ({count})" for name, count in summary["authors"])
+                print(f"  authors: {authors}")
+            if summary["sources"]:
+                sources = ", ".join(f"{name} ({count})" for name, count in summary["sources"])
+                print(f"  sources: {sources}")
+            if summary["missing"] or summary["empty"]:
+                hx.say(f"retry them with: ariadne cache retry --cache {summary['path']}")
+        return 0
+
+    if args.cache_action == "missing":
+        tweets = load_cache(args.cache)
+        recorded = load_missing_ids(args.cache)
+        if not tweets and not recorded:
+            raise RuntimeError(f"Cache not found or empty: {args.cache}")
+        for tweet_id in cache_retry_ids(tweets, recorded_missing=recorded):
+            print(tweet_id)
+        return 0
+
+    # retry
+    hx.step(f"retrying missing tweets from {args.cache}")
+    result = retry_cache(
+        args.cache,
+        limit=args.limit,
+        dump=args.dump,
+        no_dumps=args.no_dumps,
+        community_archive=args.community_archive,
+        twitterapi_key=args.twitterapi_key,
+        oembed=not args.no_oembed,
+        fetch=args.fetch,
+        bearer_token=args.bearer_token,
+    )
+    if not result.wanted:
+        hx.ok("nothing to retry -- the cache has no missing or empty tweets")
+        return 0
+    for warning in unique_preserve_order(result.warnings)[:10]:
+        hx.warn(warning)
+    remaining_warnings = len(unique_preserve_order(result.warnings)) - 10
+    if remaining_warnings > 0:
+        hx.say(f"… and {remaining_warnings} more fetch failure(s)")
+    hx.ok(
+        f"recovered {len(result.recovered)} of {len(result.wanted)} missing tweet(s); "
+        f"{len(result.still_missing)} still missing"
+    )
+    if result.still_missing:
+        hx.say(
+            "more sources may help: --community-archive, --twitterapi-key, or "
+            "--fetch with an X API token"
+        )
+    return 0
+
+
 def dumps_command(args: argparse.Namespace) -> int:
     action = args.dumps_action
     if action == "import":
@@ -645,7 +880,7 @@ def dumps_command(args: argparse.Namespace) -> int:
         return dumps_list(args)
     if action == "remove":
         path = remove_dump(args.name)
-        hx.ok(f"removed {_lit(str(path))}")
+        hx.ok(f"removed {path}")
         return 0
 
     client = LocalDumpsClient(names=args.dump or None)
@@ -668,12 +903,12 @@ def dumps_import(args: argparse.Namespace) -> int:
     info = import_dump(args.path, name=args.name, kind=args.kind, fts=not args.no_fts, progress=hx.say)
     span = f"{(info.first_tweet or '')[:10]} → {(info.last_tweet or '')[:10]}" if info.first_tweet else "empty"
     hx.ok(
-        f"imported {_lit(info.name)} ({info.kind}): {info.tweets:,} tweets, "
-        f"{info.accounts:,} accounts, {_lit(span)}"
+        f"imported {info.name} ({info.kind}): {info.tweets:,} tweets, "
+        f"{info.accounts:,} accounts, {span}"
     )
-    hx.say(f"stored at {_lit(str(info.path))}")
+    hx.say(f"stored at {info.path}")
     for note in info.notes:
-        hx.warn(_lit(note))
+        hx.warn(note)
     return 0
 
 
@@ -855,7 +1090,7 @@ def dumps_interactive(args: argparse.Namespace, client: LocalDumpsClient) -> int
                 argparse.ArgumentError,
                 argparse.ArgumentTypeError,
             ) as exc:
-                hx.warn(_lit(str(exc)))
+                hx.warn(str(exc))
     except EOFError:
         hx.say("input closed; leaving dump explorer")
         return 0
@@ -937,7 +1172,7 @@ def prompt_existing_path(label: str) -> str:
         path = Path(value).expanduser()
         if path.exists():
             return str(path)
-        hx.warn(f"path not found: {_lit(str(path))}")
+        hx.warn(f"path not found: {path}")
         hx.say("press Enter to skip this source, or enter an existing file/folder path")
 
 
@@ -945,11 +1180,11 @@ def prompt_choice(label: str, choices: tuple[str, ...], *, default: str) -> str:
     """Pick one of `choices`. hyperplex renders them numbered; the value is still the choice string."""
     options = list(choices)
     default_index = options.index(default) if default in options else None
-    return options[hx.choose(_lit(label), options, default=default_index)]
+    return options[hx.choose(label, options, default=default_index)]
 
 
 def prompt_yes_no(label: str, *, default: bool) -> bool:
-    return hx.confirm(_lit(label), default)
+    return hx.confirm(label, default)
 
 
 def prompt_secret(label: str) -> str:

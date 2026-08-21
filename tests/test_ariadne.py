@@ -524,5 +524,309 @@ class UnofficialRssFailureTests(unittest.TestCase):
         self.assertIn("bot challenge", " ".join(result.warnings))
 
 
+class ResponsesOnlyTests(unittest.TestCase):
+    """conversation_has_response: the subject must reply to or QT someone else."""
+
+    def build(self, store, target_id):
+        from ariadne.api import conversation_has_response
+
+        conversations = ConversationBuilder(store).build([target_id])
+        return conversations[0], conversation_has_response
+
+    def test_reply_to_someone_else_is_a_response(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="root", username="alice"))
+        store.add(Tweet(id="2", text="reply", username="bob", referenced_tweets=[TweetRef("replied_to", "1")]))
+        conversation, has_response = self.build(store, "2")
+        self.assertTrue(has_response(conversation, store, subject="bob"))
+
+    def test_standalone_tweet_is_not_a_response(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="just posting", username="bob"))
+        conversation, has_response = self.build(store, "1")
+        self.assertFalse(has_response(conversation, store, subject="bob"))
+
+    def test_pure_self_thread_is_not_a_response(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="thread 1/2", username="bob"))
+        store.add(Tweet(id="2", text="thread 2/2", username="bob", referenced_tweets=[TweetRef("replied_to", "1")]))
+        conversation, has_response = self.build(store, "2")
+        self.assertFalse(has_response(conversation, store, subject="bob"))
+
+    def test_quote_tweet_is_a_response(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="9", text="quoted", username="alice"))
+        store.add(Tweet(id="1", text="QT commentary", username="bob", referenced_tweets=[TweetRef("quoted", "9")]))
+        conversation, has_response = self.build(store, "1")
+        self.assertTrue(has_response(conversation, store, subject="bob"))
+
+    def test_reply_to_unknown_author_counts_as_someone_else(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="2", text="@x nope", username="bob", referenced_tweets=[TweetRef("replied_to", "1")]))
+        conversation, has_response = self.build(store, "2")
+        self.assertTrue(has_response(conversation, store, subject="bob"))
+
+    def test_pipeline_drops_non_responses(self) -> None:
+        store_file_tweets = [
+            {"id": "1", "text": "standalone", "username": "bob", "created_at": "2024-01-01T00:00:00Z"},
+            {"id": "2", "text": "root", "username": "alice", "created_at": "2024-01-01T00:00:00Z"},
+            {
+                "id": "3",
+                "text": "reply",
+                "username": "bob",
+                "created_at": "2024-01-02T00:00:00Z",
+                "in_reply_to_id": "2",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dump.json"
+            path.write_text(json.dumps({"tweets": store_file_tweets}), encoding="utf-8")
+            args = argparse_namespace(
+                tweets_file=[str(path)], for_user="bob", responses_only=True, no_dumps=True
+            )
+            result = collect_conversations(args)
+        self.assertEqual([c.target_id for c in result.conversations], ["3"])
+        self.assertTrue(any("responses_only dropped 1" in w for w in result.warnings))
+
+
+class SubjectRoleTests(unittest.TestCase):
+    def test_subject_keeps_assistant_even_when_target_author_is_unknown(self) -> None:
+        # The conversation's own target tweet lost its author (e.g. a failed
+        # hydration): with an explicit subject the roles still come out right.
+        store = TweetStore()
+        store.add(Tweet(id="1", text="bob earlier", username="bob"))
+        store.add(Tweet(id="2", text="", available=False, referenced_tweets=[TweetRef("replied_to", "1")]))
+        conversations = ConversationBuilder(store).build(["2"])
+
+        payload = json.loads(
+            render(conversations, store, output_format="openai", subject="bob")
+        )
+
+        messages = payload["conversations"][0]["messages"]
+        # bob is assistant by author; the unknown-author target stays assistant
+        self.assertEqual([m["role"] for m in messages], ["assistant", "assistant"])
+
+    def test_unknown_root_is_user_when_subject_is_known(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="2", text="@x reply", username="bob", referenced_tweets=[TweetRef("replied_to", "1")]))
+        conversations = ConversationBuilder(store).build(["2"])
+
+        payload = json.loads(
+            render(conversations, store, output_format="openai", subject="bob")
+        )
+
+        messages = payload["conversations"][0]["messages"]
+        self.assertEqual([m["role"] for m in messages], ["user", "assistant"])
+
+
+class MarkdownRunMergingTests(unittest.TestCase):
+    def build_markdown(self, store, target_id, subject=None):
+        conversations = ConversationBuilder(store).build([target_id])
+        return render(conversations, store, output_format="markdown", subject=subject)
+
+    def test_consecutive_tweets_by_same_author_merge_into_one_message(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="root", username="alice", created_at="2024-01-01T00:00:00Z", url="https://x.com/alice/status/1"))
+        store.add(
+            Tweet(
+                id="2",
+                text="bob 1/2",
+                username="bob",
+                created_at="2024-01-01T01:00:00Z",
+                url="https://x.com/bob/status/2",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+        store.add(
+            Tweet(
+                id="3",
+                text="bob 2/2",
+                username="bob",
+                created_at="2024-01-01T02:00:00Z",
+                url="https://x.com/bob/status/3",
+                referenced_tweets=[TweetRef("replied_to", "2")],
+            )
+        )
+
+        output = self.build_markdown(store, "3", subject="bob")
+
+        # one header per author run
+        self.assertEqual(output.count("### assistant: @bob"), 1)
+        self.assertEqual(output.count("### user: @alice"), 1)
+        # the run header carries the metadata of both tweets before the texts
+        run = output.split("### assistant: @bob", 1)[1]
+        header_block = run.split("\n\n", 1)[0]
+        self.assertIn("`2024-01-01T01:00:00Z`", header_block)
+        self.assertIn("https://x.com/bob/status/2", header_block)
+        self.assertIn("`2024-01-01T02:00:00Z`", header_block)
+        self.assertIn("https://x.com/bob/status/3", header_block)
+        # texts separated by a --- rule (blank-line framed, so it is not
+        # parsed as a setext heading)
+        self.assertIn("bob 1/2\n\n---\n\nbob 2/2", output)
+
+    def test_different_authors_do_not_merge(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="root", username="alice"))
+        store.add(Tweet(id="2", text="reply", username="bob", referenced_tweets=[TweetRef("replied_to", "1")]))
+        output = self.build_markdown(store, "2", subject="bob")
+        self.assertIn("### user: @alice", output)
+        self.assertIn("### assistant: @bob", output)
+        self.assertNotIn("---", output)
+
+
+class CacheRetryTests(unittest.TestCase):
+    def cache_with(self, tmp, tweets, missing=None):
+        from ariadne.store import save_cache
+
+        path = Path(tmp) / "cache.json"
+        save_cache(path, tweets, missing=missing or [])
+        return path
+
+    def test_retry_ids_combine_recorded_references_and_stubs(self) -> None:
+        from ariadne.store import cache_retry_ids
+
+        tweets = [
+            Tweet(id="1", text="has text", username="alice"),
+            Tweet(id="2", text="", username="stub"),  # empty stub
+            Tweet(id="3", text="reply", username="bob", referenced_tweets=[TweetRef("replied_to", "77")]),
+        ]
+        # "1" was recorded missing but has since been resolved; "88" has not
+        ids = cache_retry_ids(tweets, recorded_missing=["1", "88"])
+        self.assertEqual(sorted(ids), ["2", "77", "88"])
+
+    def test_save_cache_records_missing_and_preserves_it_by_default(self) -> None:
+        from ariadne.store import load_missing_ids, save_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.cache_with(tmp, [Tweet(id="1", text="t", username="a")], missing=["9", "8"])
+            self.assertEqual(load_missing_ids(path), ["8", "9"])
+            # a save without `missing` keeps the recorded list
+            save_cache(path, [Tweet(id="1", text="t", username="a")])
+            self.assertEqual(load_missing_ids(path), ["8", "9"])
+
+    def test_cache_summary_counts(self) -> None:
+        from ariadne.store import cache_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.cache_with(
+                tmp,
+                [
+                    Tweet(id="1", text="t", username="alice", created_at="2024-01-01T00:00:00Z"),
+                    Tweet(id="2", text="reply", username="alice", referenced_tweets=[TweetRef("replied_to", "77")]),
+                ],
+                missing=["88"],
+            )
+            summary = cache_summary(path)
+        self.assertEqual(summary["tweets"], 2)
+        self.assertEqual(summary["with_text"], 2)
+        self.assertEqual(summary["empty"], 0)
+        self.assertEqual(summary["missing"], 2)  # 77 referenced + 88 recorded
+        self.assertEqual(summary["authors"][0], ("@alice", 2))
+
+    def test_retry_recovers_and_rerecords_missing(self) -> None:
+        from ariadne.api import retry_cache
+        from ariadne.store import load_cache, load_missing_ids
+
+        class FakeFetcher:
+            def __init__(self):
+                self.asked = []
+
+            def get_posts(self, ids):
+                self.asked.append(list(ids))
+                return FetchResult(
+                    tweets=[Tweet(id="77", text="found it", username="carol")],
+                    errors={"88": "no source has it"},
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.cache_with(
+                tmp,
+                [Tweet(id="2", text="reply", username="bob", referenced_tweets=[TweetRef("replied_to", "77")])],
+                missing=["88"],
+            )
+            fetcher = FakeFetcher()
+            result = retry_cache(path, fetcher=fetcher)
+
+            self.assertEqual(sorted(fetcher.asked[0]), ["77", "88"])
+            self.assertEqual(result.recovered, ["77"])
+            self.assertEqual(result.still_missing, ["88"])
+            self.assertTrue(any("no source has it" in w for w in result.warnings))
+            # the recovered tweet is now cached; 88 stays recorded for next time
+            cached_ids = {tweet.id for tweet in load_cache(path)}
+            self.assertIn("77", cached_ids)
+            self.assertEqual(load_missing_ids(path), ["88"])
+
+    def test_retry_limit_does_not_forget_unattempted_ids(self) -> None:
+        from ariadne.api import retry_cache
+        from ariadne.store import load_missing_ids
+
+        class EmptyFetcher:
+            def get_posts(self, ids):
+                return FetchResult(tweets=[], errors={})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.cache_with(
+                tmp, [Tweet(id="1", text="t", username="a")], missing=["7", "8", "9"]
+            )
+            result = retry_cache(path, limit=1, fetcher=EmptyFetcher())
+            self.assertEqual(len(result.wanted), 1)
+            self.assertEqual(load_missing_ids(path), ["7", "8", "9"])
+
+    def test_build_records_unresolved_ids_in_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dump_path = Path(tmp) / "dump.json"
+            dump_path.write_text(
+                json.dumps(
+                    {
+                        "tweets": [
+                            {
+                                "id": "2",
+                                "text": "reply to a hole",
+                                "username": "bob",
+                                "created_at": "2024-01-01T00:00:00Z",
+                                "in_reply_to_id": "1",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cache_path = Path(tmp) / "cache.json"
+            args = argparse_namespace(
+                tweets_file=[str(dump_path)],
+                for_user="bob",
+                no_cache=False,
+                cache=str(cache_path),
+                no_dumps=True,
+            )
+            result = collect_conversations(args)
+            self.assertEqual(result.unresolved_ids(), ["1"])
+            result.save_cache(cache_path, force=True)
+
+            from ariadne.store import load_missing_ids
+
+            self.assertEqual(load_missing_ids(cache_path), ["1"])
+
+
+class MenuNavigationTests(unittest.TestCase):
+    def test_menu_step_keys(self):
+        from ariadne.hx import _menu_step
+
+        self.assertEqual(_menu_step("down", 0, 3), (1, False))
+        self.assertEqual(_menu_step("j", 2, 3), (0, False))  # wraps
+        self.assertEqual(_menu_step("k", 0, 3), (2, False))  # wraps
+        self.assertEqual(_menu_step("2", 0, 3), (1, False))  # digit jumps
+        self.assertEqual(_menu_step("\r", 1, 3), (1, True))
+
+    def test_choose_falls_back_without_a_tty(self):
+        import io
+        from unittest import mock
+
+        from ariadne.hx import _choose_with_keys
+
+        with mock.patch.object(sys, "stdin", io.StringIO()):
+            self.assertIsNone(_choose_with_keys("Pick", ["a", "b"], 0))
+
+
 if __name__ == "__main__":
     unittest.main()

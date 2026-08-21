@@ -15,17 +15,18 @@ def render(
     store: TweetStore,
     *,
     output_format: OutputFormat,
+    subject: str | None = None,
 ) -> str:
     if output_format == "json":
         return render_json(conversations, store)
     if output_format == "messages":
-        return render_messages(conversations, store, strict_openai=False)
+        return render_messages(conversations, store, strict_openai=False, subject=subject)
     if output_format == "openai":
-        return render_messages(conversations, store, strict_openai=True)
+        return render_messages(conversations, store, strict_openai=True, subject=subject)
     if output_format == "raft":
-        return render_raft_jsonl(conversations, store)
+        return render_raft_jsonl(conversations, store, subject=subject)
     if output_format == "markdown":
-        return render_markdown(conversations, store)
+        return render_markdown(conversations, store, subject=subject)
     raise ValueError(f"Unsupported output format: {output_format}")
 
 
@@ -49,7 +50,11 @@ def render_json(conversations: list[Conversation], store: TweetStore) -> str:
 
 
 def message_conversations(
-    conversations: list[Conversation], store: TweetStore, *, strict_openai: bool
+    conversations: list[Conversation],
+    store: TweetStore,
+    *,
+    strict_openai: bool,
+    subject: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build the rendered message conversations as data.
 
@@ -68,7 +73,9 @@ def message_conversations(
             if quote_contexts:
                 content = "\n\n".join([content] + [_quote_block(context, store) for context in quote_contexts])
             message: dict[str, Any] = {
-                "role": _role(tweet, tweet_id, conversation, target, other="user"),
+                "role": _role(
+                    tweet, tweet_id, conversation, target, other="user", subject=subject
+                ),
                 "name": message_name(tweet, fallback=tweet_id),
                 "content": content,
             }
@@ -93,19 +100,26 @@ def message_conversations(
 
 
 def render_messages(
-    conversations: list[Conversation], store: TweetStore, *, strict_openai: bool
+    conversations: list[Conversation],
+    store: TweetStore,
+    *,
+    strict_openai: bool,
+    subject: str | None = None,
 ) -> str:
     payload = {
         "format": "openai.messages.v1" if strict_openai else "messages",
         "conversations": message_conversations(
-            conversations, store, strict_openai=strict_openai
+            conversations, store, strict_openai=strict_openai, subject=subject
         ),
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
 def raft_documents(
-    conversations: list[Conversation], store: TweetStore
+    conversations: list[Conversation],
+    store: TweetStore,
+    *,
+    subject: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build the ``raft.documents.v1`` rows as data, one per conversation."""
     rows: list[dict[str, Any]] = []
@@ -119,7 +133,9 @@ def raft_documents(
             tweet = store.get(tweet_id)
             author = display_author(tweet)
             participants.add(author)
-            role = _role(tweet, tweet_id, conversation, target, other="participant")
+            role = _role(
+                tweet, tweet_id, conversation, target, other="participant", subject=subject
+            )
             content = _tweet_content(tweet)
             message = {
                 "role": role,
@@ -161,35 +177,51 @@ def raft_documents(
     return rows
 
 
-def render_raft_jsonl(conversations: list[Conversation], store: TweetStore) -> str:
+def render_raft_jsonl(
+    conversations: list[Conversation],
+    store: TweetStore,
+    *,
+    subject: str | None = None,
+) -> str:
     lines = [
         json.dumps(row, sort_keys=True)
-        for row in raft_documents(conversations, store)
+        for row in raft_documents(conversations, store, subject=subject)
     ]
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def render_markdown(conversations: list[Conversation], store: TweetStore) -> str:
+def render_markdown(
+    conversations: list[Conversation],
+    store: TweetStore,
+    *,
+    subject: str | None = None,
+) -> str:
     lines: list[str] = []
     for conversation_index, conversation in enumerate(conversations, start=1):
         if len(conversations) > 1:
             lines.append(f"## Conversation {conversation_index}: {conversation.target_id}")
             lines.append("")
         quote_map = _quotes_by_owner(conversation.quotes)
-        target = store.get(conversation.target_id)
-        for tweet_id in conversation.path:
-            tweet = store.get(tweet_id)
-            role = _role(tweet, tweet_id, conversation, target, other="user")
-            lines.append(f"### {role}: {display_author(tweet)}")
-            if tweet and tweet.created_at:
-                lines.append(f"`{tweet.created_at}`")
-            if tweet and tweet.url:
-                lines.append(tweet.url)
+        for run in _author_runs(conversation, store, subject=subject):
+            role, author, tweet_ids = run
+            lines.append(f"### {role}: {author}")
+            for tweet_id in tweet_ids:
+                tweet = store.get(tweet_id)
+                if tweet and tweet.created_at:
+                    lines.append(f"`{tweet.created_at}`")
+                if tweet and tweet.url:
+                    lines.append(tweet.url)
             lines.append("")
-            lines.append(_tweet_content(tweet))
-            for quote_context in quote_map.get(tweet_id, []):
-                lines.append("")
-                lines.append(_quote_block(quote_context, store))
+            segments: list[str] = []
+            for tweet_id in tweet_ids:
+                tweet = store.get(tweet_id)
+                segment = _tweet_content(tweet)
+                for quote_context in quote_map.get(tweet_id, []):
+                    segment += "\n\n" + _quote_block(quote_context, store)
+                segments.append(segment)
+            # A blank line before --- matters: text followed directly by
+            # dashes is a setext heading in markdown, not a rule.
+            lines.append("\n\n---\n\n".join(segments))
             lines.append("")
         if conversation.warnings:
             lines.append("Warnings:")
@@ -199,6 +231,35 @@ def render_markdown(conversations: list[Conversation], store: TweetStore) -> str
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _author_runs(
+    conversation: Conversation,
+    store: TweetStore,
+    *,
+    subject: str | None,
+) -> list[tuple[str, str, list[str]]]:
+    """Group the path into runs of consecutive tweets by the same author.
+
+    A thread of e.g. three consecutive tweets by the subject renders as one
+    message: one role header, the metadata of all three, then the texts.
+
+    Returns:
+        (role, display_author, tweet_ids) per run, in path order.
+    """
+    target = store.get(conversation.target_id)
+    runs: list[tuple[str, str, list[str]]] = []
+    for tweet_id in conversation.path:
+        tweet = store.get(tweet_id)
+        role = _role(tweet, tweet_id, conversation, target, other="user", subject=subject)
+        author = display_author(tweet)
+        # Two [deleted] tweets in a row are not known to share an author, so
+        # they never merge into one run.
+        if runs and runs[-1][0] == role and runs[-1][1] == author and author != "[deleted]":
+            runs[-1][2].append(tweet_id)
+        else:
+            runs.append((role, author, [tweet_id]))
+    return runs
+
+
 def _role(
     tweet: Tweet | None,
     tweet_id: str,
@@ -206,15 +267,36 @@ def _role(
     target: Tweet | None,
     *,
     other: str,
+    subject: str | None = None,
 ) -> str:
-    """The target user's tweets speak as the assistant; everyone else as `other`.
+    """The subject's tweets speak as the assistant; everyone else as `other`.
 
-    The id check keeps the target tweet itself an assistant turn even when it
-    is missing from the store and its author cannot be compared.
+    With a known ``subject`` (the collected username), roles come from the
+    author alone; a conversation's own target tweet only falls back to
+    assistant when its author cannot be determined at all. Without one, the
+    author of the conversation's target tweet is the subject, and the id
+    check keeps the target tweet an assistant turn even when it is missing
+    from the store and its author cannot be compared.
     """
+    if subject is not None:
+        if _authored_by_username(tweet, subject):
+            return "assistant"
+        if tweet_id == conversation.target_id and _author_unknown(tweet):
+            return "assistant"
+        return other
     if tweet_id == conversation.target_id or _authored_by_target(tweet, target):
         return "assistant"
     return other
+
+
+def _authored_by_username(tweet: Tweet | None, username: str) -> bool:
+    if tweet is None or not tweet.username:
+        return False
+    return tweet.username.strip("@").lower() == username.strip("@").lower()
+
+
+def _author_unknown(tweet: Tweet | None) -> bool:
+    return tweet is None or not (tweet.username or tweet.author_id)
 
 
 def _authored_by_target(tweet: Tweet | None, target: Tweet | None) -> bool:
@@ -237,20 +319,21 @@ def message_name(tweet: Tweet | None, *, fallback: str) -> str:
 
 
 def display_author(tweet: Tweet | None) -> str:
+    """A deleted tweet, or one whose author is unknown, is attributed to [deleted]."""
     if tweet is None:
-        return "unknown"
+        return "[deleted]"
     if tweet.username:
         return f"@{tweet.username}"
     if tweet.name:
         return tweet.name
     if tweet.author_id:
         return tweet.author_id
-    return "unknown"
+    return "[deleted]"
 
 
 def _tweet_content(tweet: Tweet | None) -> str:
-    if tweet is None:
-        return "[missing tweet]"
+    if tweet is None or not tweet.available:
+        return "[deleted]"
     return tweet.text or f"[tweet {tweet.id} has no text]"
 
 

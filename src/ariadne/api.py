@@ -33,13 +33,20 @@ from .models import Conversation, Tweet
 from .providers import CommunityArchiveClient, TwitterApiIoClient
 from .reconstruct import ConversationBuilder, TweetFetcher
 from .render import (
+    _role,
     json_payload,
     message_conversations,
     raft_documents,
     render,
 )
 from .sources import load_tweets_file, select_user_tweet_ids
-from .store import TweetStore, load_cache, save_cache
+from .store import (
+    TweetStore,
+    cache_retry_ids,
+    load_cache,
+    load_missing_ids,
+    save_cache,
+)
 from .timeutil import is_on_or_after, parse_since
 from .unofficial import NitterRssClient
 
@@ -47,10 +54,13 @@ __all__ = [
     "BuildKwargs",
     "BuildOptions",
     "BuildResult",
+    "CacheRetryResult",
     "OutputFormat",
     "PathInput",
     "build",
     "build_conversations",
+    "conversation_has_response",
+    "retry_cache",
     "DEFAULT_RSS_BASES",
 ]
 
@@ -84,6 +94,7 @@ class BuildKwargs(TypedDict, total=False):
     author_id: str | None
     all_loaded: bool
     replies_only: bool
+    responses_only: bool
     since: str | None
     cheap_first: bool
     oembed: bool
@@ -180,6 +191,10 @@ class BuildOptions:
     author_id: str | None = None
     all_loaded: bool = False
     replies_only: bool = False
+    # Keep only conversations in which the subject actually responds --
+    # replies to or quote-tweets someone else. Drops standalone tweets and
+    # pure self-threads.
+    responses_only: bool = False
     since: str | None = None
 
     # Sources
@@ -316,16 +331,20 @@ class BuildResult:
             self.conversations,
             self.store,
             output_format=output_format or self._default_format(),
+            subject=self._subject(),
         )
 
     def raft_documents(self) -> list[dict[str, Any]]:
         """The ``raft.documents.v1`` rows as dicts, ready for raft."""
-        return raft_documents(self.conversations, self.store)
+        return raft_documents(self.conversations, self.store, subject=self._subject())
 
     def messages(self, *, strict_openai: bool = False) -> list[dict[str, Any]]:
         """Rendered chat conversations as dicts."""
         return message_conversations(
-            self.conversations, self.store, strict_openai=strict_openai
+            self.conversations,
+            self.store,
+            strict_openai=strict_openai,
+            subject=self._subject(),
         )
 
     def json_payload(self) -> dict[str, Any]:
@@ -343,22 +362,42 @@ class BuildResult:
         destination.write_text(self.render(output_format), encoding="utf-8")
         return destination
 
+    def unresolved_ids(self) -> list[str]:
+        """Ids in the reconstructed conversations still missing or textless."""
+        ids: list[str] = []
+        for conversation in self.conversations:
+            for tweet_id in sorted(conversation.all_ids):
+                tweet = self.store.get(tweet_id)
+                if tweet is None or not tweet.available or not tweet.text:
+                    ids.append(tweet_id)
+        return unique_preserve_order(ids)
+
     def save_cache(
         self,
         path: PathInput | None = None,
         *,
         force: bool = False,
     ) -> Path | None:
-        """Persist fetched/hydrated tweets, if this run fetched anything."""
+        """Persist fetched/hydrated tweets, if this run fetched anything.
+
+        The still-unresolved ids are recorded alongside, so a later session
+        can pick them up with ``retry_cache`` / ``ariadne cache retry``.
+        """
         if not (force or self.should_save_cache):
             return None
         target = path or (self.options.cache if self.options else DEFAULT_CACHE_PATH)
         target_path = Path(target).expanduser()
-        save_cache(target_path, self.store.cacheable_tweets())
+        save_cache(
+            target_path, self.store.cacheable_tweets(), missing=self.unresolved_ids()
+        )
         return target_path
 
     def _default_format(self) -> OutputFormat:
         return self.options.format if self.options else "messages"
+
+    def _subject(self) -> str | None:
+        """The collected username, when this build had one."""
+        return target_username(self.options) if self.options else None
 
 
 @overload
@@ -650,6 +689,20 @@ def _run_build(
         )
         warnings.extend(hydrate_empty_tweets(store, oembed, ids_to_hydrate))
 
+    if options.responses_only:
+        # After hydration, so author identities are as complete as they get.
+        kept = [
+            conversation
+            for conversation in conversations
+            if conversation_has_response(conversation, store, subject=target_user)
+        ]
+        if len(kept) != len(conversations):
+            warnings.append(
+                f"responses_only dropped {len(conversations) - len(kept)} "
+                "conversation(s) in which the subject does not respond"
+            )
+        conversations = kept
+
     warnings.extend(builder.warnings)
     return BuildResult(
         store=store,
@@ -661,6 +714,160 @@ def _run_build(
         ),
         options=options,
     )
+
+
+@dataclass
+class CacheRetryResult:
+    """The outcome of retrying a cache's missing tweets."""
+
+    path: str
+    wanted: list[str]
+    recovered: list[str]
+    still_missing: list[str]
+    warnings: list[str]
+
+    def __bool__(self) -> bool:
+        return bool(self.recovered)
+
+
+def retry_cache(
+    cache: PathInput = DEFAULT_CACHE_PATH,
+    *,
+    limit: int | None = None,
+    dump: StringValues = None,
+    no_dumps: bool = False,
+    community_archive: bool = False,
+    twitterapi_key: str | None = None,
+    oembed: bool = True,
+    fetch: bool = False,
+    bearer_token: str | None = None,
+    fetcher: "TweetFetcher | None" = None,
+) -> CacheRetryResult:
+    """Retry the tweets a previous build could not resolve, updating the cache.
+
+    Runs from the cache file alone, so it can happen in a different session,
+    long after the build: the cache's reply/quote references that were never
+    fetched, plus its textless stubs and tombstones, form the retry set. They
+    are re-attempted through whatever sources are enabled -- local dumps and
+    oEmbed by default, plus the Community Archive, twitterapi.io, or the X
+    API on request -- and the cache is rewritten with whatever was recovered.
+
+    Note: the cache write is last-writer-wins; retry after a build using the
+    same cache has finished, not concurrently with it.
+
+    Args:
+        cache: The cache file of a previous build.
+        limit: Retry at most this many ids (oldest references first).
+        fetcher: Override the source chain entirely (mostly for tests).
+
+    Returns:
+        CacheRetryResult: What was wanted, recovered, and still missing.
+    """
+    path = Path(os.fspath(cache)).expanduser()
+    tweets = load_cache(path)
+    if not tweets:
+        raise ConfigurationError(f"Cache not found or empty: {path}")
+
+    store = TweetStore()
+    store.add_many(tweets, cacheable=True)
+    retryable = cache_retry_ids(tweets, recorded_missing=load_missing_ids(path))
+    wanted = retryable[:limit] if limit is not None else retryable
+    if not wanted:
+        return CacheRetryResult(str(path), [], [], [], [])
+
+    warnings: list[str] = []
+    local_dumps: LocalDumpsClient | None = None
+    try:
+        if fetcher is None:
+            if not no_dumps:
+                client = LocalDumpsClient(names=_normalize_values(dump, name="dump") or None)
+                local_dumps = client if client.available() else None
+            token = (
+                bearer_token
+                or os.environ.get("X_BEARER_TOKEN")
+                or os.environ.get("TWITTER_BEARER_TOKEN")
+            )
+            if fetch and not token:
+                raise ConfigurationError(
+                    "fetch=True requires bearer_token, X_BEARER_TOKEN, or TWITTER_BEARER_TOKEN"
+                )
+            tapio_key = twitterapi_key or os.environ.get("TWITTERAPI_IO_KEY")
+            fetcher = make_branch_fetcher(
+                dumps=local_dumps,
+                community=CommunityArchiveClient() if community_archive else None,
+                tapio=TwitterApiIoClient(tapio_key) if tapio_key else None,
+                oembed=OEmbedClient(tweet_lookup=store.get) if oembed else None,
+                x_client=XApiClient(token) if fetch and token else None,
+                cheap_first=True,
+            )
+        if fetcher is None:
+            raise ConfigurationError(
+                "No sources to retry with: enable oembed, import local dumps, or "
+                "pass community_archive/twitterapi_key/fetch"
+            )
+
+        result = fetcher.get_posts(wanted)
+        store.add_many(result.tweets, cacheable=True)
+        warnings.extend(
+            f"Could not fetch tweet {tweet_id}: {message}"
+            for tweet_id, message in result.errors.items()
+        )
+    finally:
+        if local_dumps is not None:
+            local_dumps.close()
+
+    recovered = [
+        tweet_id
+        for tweet_id in wanted
+        if (tweet := store.get(tweet_id)) is not None and tweet.available and tweet.text
+    ]
+    recovered_set = set(recovered)
+    # Recorded against the full retryable set, not just this run's slice, so
+    # a --limit run does not forget the ids it never attempted.
+    still_missing = [tweet_id for tweet_id in retryable if tweet_id not in recovered_set]
+    save_cache(path, store.cacheable_tweets(), missing=still_missing)
+    return CacheRetryResult(
+        str(path),
+        wanted,
+        recovered,
+        [tweet_id for tweet_id in wanted if tweet_id not in recovered_set],
+        warnings,
+    )
+
+
+def conversation_has_response(
+    conversation: Conversation,
+    store: TweetStore,
+    *,
+    subject: str | None = None,
+) -> bool:
+    """Whether the subject actually responds in this conversation.
+
+    A response is a subject tweet that replies to, or quote-tweets, a tweet
+    not authored by the subject; an unknown author counts as someone else.
+    Standalone tweets and pure self-threads have no response. ``subject`` is
+    the collected username; without one, the author of the conversation's
+    target tweet is the subject (matching how roles are assigned).
+    """
+    target = store.get(conversation.target_id)
+
+    def is_subject(tweet: Tweet | None, tweet_id: str) -> bool:
+        role = _role(tweet, tweet_id, conversation, target, other="user", subject=subject)
+        return role == "assistant"
+
+    for tweet_id in conversation.path:
+        tweet = store.get(tweet_id)
+        if tweet is None or not is_subject(tweet, tweet_id):
+            continue
+        parent_id = tweet.reply_parent_id()
+        if parent_id and not is_subject(store.get(parent_id), parent_id):
+            return True
+        if any(
+            not is_subject(store.get(quote_id), quote_id)
+            for quote_id in tweet.quote_ids()
+        ):
+            return True
+    return False
 
 
 def collect_input_values(items: list[str], input_files: list[str]) -> list[str]:
