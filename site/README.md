@@ -1,7 +1,7 @@
 # ariadne site
 
-This is the public site for `ariadne`, built as a small Next app for
-Vercel.
+This is the public documentation site for `ariadne`, built as a small Next app.
+It keeps a standard Next build for Vercel and a vinext build for OpenAI Sites.
 
 ## Prerequisites
 
@@ -21,6 +21,18 @@ npm test
 ```
 
 `npm test` runs the linter and a production Next build.
+
+To verify the Sites/Cloudflare worker bundle as well:
+
+```bash
+npm run build:sites
+```
+
+## OpenAI Sites
+
+The local `.openai/hosting.json` binds this source tree to its Sites project.
+`npm run build:sites` writes the deployable worker and static assets to
+`dist/`.
 
 ## Deploying To Vercel
 

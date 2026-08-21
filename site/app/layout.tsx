@@ -1,46 +1,52 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, JetBrains_Mono, Michroma } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const jetBrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains",
+  subsets: ["latin"],
+});
+
+const michroma = Michroma({
+  variable: "--font-michroma",
+  weight: "400",
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://ariadne.hyperplex.org"),
-  title: "ariadne",
+  title: "ariadne — follow the thread",
   description:
-    "Archive-first tweet conversation reconstruction for LLM input and Raft-ready retrieval documents.",
+    "Import, search, and reconstruct complete X/Twitter conversations across local archives.",
   icons: {
-    icon: "/og.png",
+    icon: "/favicon.svg",
   },
   openGraph: {
-    title: "ariadne",
+    title: "ariadne — follow the thread",
     description:
-      "Rebuild reply branches from archives, hydrate cheaply, and export Raft-ready JSONL.",
+      "Import, search, and reconstruct complete conversations across local X/Twitter archives.",
     url: "https://ariadne.hyperplex.org",
     siteName: "ariadne",
     images: [
       {
-        url: "/og.png",
-        width: 1680,
-        height: 945,
-        alt: "Archived social posts transforming into conversation branches and retrieval documents.",
+        url: "/ariadne-thread-v2.png",
+        width: 1672,
+        height: 941,
+        alt: "A golden conversation thread crossing several archives on a Hyperplex blue field.",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "ariadne",
+    title: "ariadne — follow the thread",
     description:
-      "Archive-first tweet conversation reconstruction for LLM input and Raft-ready retrieval documents.",
-    images: ["/og.png"],
+      "Import, search, and reconstruct complete conversations across local X/Twitter archives.",
+    images: ["/ariadne-thread-v2.png"],
   },
 };
 
@@ -51,7 +57,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable}`}>
+      <body className={`${inter.variable} ${jetBrainsMono.variable} ${michroma.variable}`}>
         {children}
       </body>
     </html>
