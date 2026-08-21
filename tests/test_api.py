@@ -115,7 +115,7 @@ class BuildResultTests(unittest.TestCase):
         messages = result.messages()
         self.assertEqual(
             [message["role"] for message in messages[0]["messages"]],
-            ["assistant", "user"],
+            ["assistant", "assistant"],
         )
         rendered = json.loads(result.render("messages"))
         self.assertEqual(rendered["conversations"], messages)

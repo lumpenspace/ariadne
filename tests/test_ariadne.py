@@ -144,19 +144,32 @@ class AriadneTests(unittest.TestCase):
         self.assertEqual(conversations[0].path, ["1", "2"])
         self.assertEqual(conversations[0].quotes[0].path, ["8", "9"])
 
-    def test_messages_render_root_as_assistant(self) -> None:
+    def test_messages_render_target_author_as_assistant(self) -> None:
         store = TweetStore()
         store.add(Tweet(id="1", text="root", username="alice"))
         store.add(Tweet(id="2", text="reply", username="bob", referenced_tweets=[TweetRef("replied_to", "1")]))
+        store.add(Tweet(id="3", text="counter", username="alice", referenced_tweets=[TweetRef("replied_to", "2")]))
+        store.add(Tweet(id="4", text="closing", username="bob", referenced_tweets=[TweetRef("replied_to", "3")]))
+        conversations = ConversationBuilder(store).build(["4"])
+
+        payload = json.loads(render(conversations, store, output_format="openai"))
+
+        messages = payload["conversations"][0]["messages"]
+        self.assertEqual(
+            [(message["role"], message["name"]) for message in messages],
+            [("user", "alice"), ("assistant", "bob"), ("user", "alice"), ("assistant", "bob")],
+        )
+
+    def test_messages_render_missing_target_tweet_as_assistant(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="root", username="alice"))
+        store.add(Tweet(id="2", text="", available=False, referenced_tweets=[TweetRef("replied_to", "1")]))
         conversations = ConversationBuilder(store).build(["2"])
 
         payload = json.loads(render(conversations, store, output_format="openai"))
 
         messages = payload["conversations"][0]["messages"]
-        self.assertEqual(messages[0]["role"], "assistant")
-        self.assertEqual(messages[0]["name"], "alice")
-        self.assertEqual(messages[1]["role"], "user")
-        self.assertEqual(messages[1]["name"], "bob")
+        self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
 
     def test_raft_render_outputs_jsonl_documents(self) -> None:
         store = TweetStore()
@@ -171,7 +184,8 @@ class AriadneTests(unittest.TestCase):
         self.assertEqual(rows[0]["id"], "ariadne:2")
         self.assertIn("@alice: root", rows[0]["text"])
         self.assertEqual(rows[0]["metadata"]["tweet_ids"], ["1", "2"])
-        self.assertEqual(rows[0]["messages"][1]["role"], "participant")
+        self.assertEqual(rows[0]["messages"][0]["role"], "participant")
+        self.assertEqual(rows[0]["messages"][1]["role"], "assistant")
 
     def test_generic_json_file_selects_user_tweets_since_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

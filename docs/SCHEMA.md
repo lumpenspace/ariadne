@@ -12,7 +12,7 @@ Machine-readable graph output:
 
 ## `messages`
 
-Conversation output with OpenAI-like roles plus tweet metadata. The first branch tweet is `assistant`; later branch tweets are `user`.
+Conversation output with OpenAI-like roles plus tweet metadata. Tweets authored by the target user (the author of the branch's target tweet) are `assistant`; tweets from everyone else are `user`.
 
 ## `openai`
 
@@ -48,7 +48,7 @@ JSONL documents intended for retrieval, chunking, and future RAFT ingestion. Eac
   },
   "messages": [
     {
-      "role": "assistant",
+      "role": "participant",
       "tweet_id": "1001",
       "author": "@alice",
       "username": "alice",
@@ -57,7 +57,7 @@ JSONL documents intended for retrieval, chunking, and future RAFT ingestion. Eac
       "text": "root tweet"
     },
     {
-      "role": "participant",
+      "role": "assistant",
       "tweet_id": "1002",
       "author": "@bob",
       "username": "bob",
@@ -71,5 +71,7 @@ JSONL documents intended for retrieval, chunking, and future RAFT ingestion. Eac
 ```
 
 The `text` field is optimized for retrieval and embedding. `messages` keeps
-per-post attribution and timestamps, `quotes` preserves attached quote paths,
+per-post attribution and timestamps — roles follow the same target-user rule
+as the `messages` format, with `participant` in place of `user` — `quotes`
+preserves attached quote paths,
 and the metadata fields keep selection, dedupe, and warning provenance.

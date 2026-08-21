@@ -159,7 +159,7 @@ class BlueskyTests(unittest.TestCase):
 
         self.assertEqual(len(result.conversations), 1)
         doc = result.raft_documents()[0]
-        self.assertEqual([m["role"] for m in doc["messages"]], ["assistant", "participant", "participant"])
+        self.assertEqual([m["role"] for m in doc["messages"]], ["participant", "participant", "assistant"])
         self.assertEqual([m["author"] for m in doc["messages"]], ["@alice", "@bob", "@me"])
         self.assertEqual(doc["metadata"]["target_url"], "https://bsky.app/profile/me/post/r2")
 

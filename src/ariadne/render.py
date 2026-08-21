@@ -59,15 +59,16 @@ def message_conversations(
     rendered_conversations: list[dict[str, Any]] = []
     for conversation in conversations:
         quote_map = _quotes_by_owner(conversation.quotes)
+        target = store.get(conversation.target_id)
         messages: list[dict[str, Any]] = []
-        for index, tweet_id in enumerate(conversation.path):
+        for tweet_id in conversation.path:
             tweet = store.get(tweet_id)
             content = _tweet_content(tweet)
             quote_contexts = quote_map.get(tweet_id, [])
             if quote_contexts:
                 content = "\n\n".join([content] + [_quote_block(context, store) for context in quote_contexts])
             message: dict[str, Any] = {
-                "role": "assistant" if index == 0 else "user",
+                "role": _role(tweet, tweet_id, conversation, target, other="user"),
                 "name": message_name(tweet, fallback=tweet_id),
                 "content": content,
             }
@@ -110,14 +111,15 @@ def raft_documents(
     rows: list[dict[str, Any]] = []
     for conversation in conversations:
         quote_map = _quotes_by_owner(conversation.quotes)
+        target = store.get(conversation.target_id)
         messages: list[dict[str, Any]] = []
         text_blocks: list[str] = []
         participants: set[str] = set()
-        for index, tweet_id in enumerate(conversation.path):
+        for tweet_id in conversation.path:
             tweet = store.get(tweet_id)
             author = display_author(tweet)
             participants.add(author)
-            role = "assistant" if index == 0 else "participant"
+            role = _role(tweet, tweet_id, conversation, target, other="participant")
             content = _tweet_content(tweet)
             message = {
                 "role": role,
@@ -174,9 +176,10 @@ def render_markdown(conversations: list[Conversation], store: TweetStore) -> str
             lines.append(f"## Conversation {conversation_index}: {conversation.target_id}")
             lines.append("")
         quote_map = _quotes_by_owner(conversation.quotes)
-        for index, tweet_id in enumerate(conversation.path):
+        target = store.get(conversation.target_id)
+        for tweet_id in conversation.path:
             tweet = store.get(tweet_id)
-            role = "assistant" if index == 0 else "user"
+            role = _role(tweet, tweet_id, conversation, target, other="user")
             lines.append(f"### {role}: {display_author(tweet)}")
             if tweet and tweet.created_at:
                 lines.append(f"`{tweet.created_at}`")
@@ -194,6 +197,34 @@ def render_markdown(conversations: list[Conversation], store: TweetStore) -> str
                 lines.append(f"- {warning}")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _role(
+    tweet: Tweet | None,
+    tweet_id: str,
+    conversation: Conversation,
+    target: Tweet | None,
+    *,
+    other: str,
+) -> str:
+    """The target user's tweets speak as the assistant; everyone else as `other`.
+
+    The id check keeps the target tweet itself an assistant turn even when it
+    is missing from the store and its author cannot be compared.
+    """
+    if tweet_id == conversation.target_id or _authored_by_target(tweet, target):
+        return "assistant"
+    return other
+
+
+def _authored_by_target(tweet: Tweet | None, target: Tweet | None) -> bool:
+    if tweet is None or target is None:
+        return False
+    if tweet.username and target.username:
+        return tweet.username.lower() == target.username.lower()
+    if tweet.author_id and target.author_id:
+        return tweet.author_id == target.author_id
+    return False
 
 
 def message_name(tweet: Tweet | None, *, fallback: str) -> str:
