@@ -38,7 +38,7 @@ from .store import save_cache
 from .ids import unique_preserve_order
 
 
-COMMANDS = {"build", "inspect-archive", "interactive"}
+COMMANDS = {"build", "inspect-archive", "interactive", "bluesky"}
 
 # The pipeline moved to `api`; this module is now just an argparse front-end.
 # Everything below stays importable from `ariadne.cli` because it was public
@@ -88,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
             return inspect_archive(args)
         if args.command == "interactive":
             return interactive(args)
+        if args.command == "bluesky":
+            return bluesky_command(args)
         return build(args)
     except (FileNotFoundError, RuntimeError, XApiError, ValueError, argparse.ArgumentTypeError) as exc:
         print(f"ariadne: {exc}", file=sys.stderr)
@@ -113,6 +115,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect_cmd = subparsers.add_parser("inspect-archive", help="Summarize archive tweet data.")
     inspect_cmd.add_argument("archive", help="X/Twitter archive folder, zip, or data file.")
+
+    bluesky_cmd = subparsers.add_parser("bluesky", help="Reconstruct reply threads from Bluesky.")
+    bluesky_cmd.add_argument("actor", help="Bluesky handle (alice.bsky.social) or DID.")
+    bluesky_cmd.add_argument("--since", help="Only posts on or after this date, e.g. 2024-01-01.")
+    bluesky_cmd.add_argument("--limit", type=positive_int, default=60, help="Recent posts to walk. Default: 60.")
+    bluesky_cmd.add_argument("--no-replies", action="store_true", help="Skip the actor's replies.")
+    bluesky_cmd.add_argument(
+        "--format",
+        choices=("messages", "openai", "json", "markdown", "raft"),
+        default="messages",
+        help="Output format. Default: messages.",
+    )
+    bluesky_cmd.add_argument("-o", "--output", help="Write output to this file instead of stdout.")
     return parser
 
 
@@ -245,6 +260,41 @@ def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
         help="Maximum reply ancestors to follow per branch. Default: 50.",
     )
     build_cmd.add_argument("--no-quotes", action="store_true", help="Do not attach quote contexts.")
+    build_cmd.add_argument(
+        "--no-quote-as-reply",
+        dest="quote_as_reply",
+        action="store_false",
+        help="Do not splice a root quote-tweet's quoted tweet in as its reply-parent.",
+    )
+    build_cmd.add_argument(
+        "--community-archive",
+        action="store_true",
+        help="Use the Community Archive (community-archive.org) to enumerate the "
+        "target and complete reply/quote parents by anyone in the archive.",
+    )
+    build_cmd.add_argument(
+        "--twitterapi-key",
+        help="twitterapi.io API key (or set TWITTERAPI_IO_KEY) to use it as a source.",
+    )
+
+
+def bluesky_command(args: argparse.Namespace) -> int:
+    from .bluesky import build_bluesky
+
+    result = build_bluesky(
+        args.actor,
+        limit=args.limit,
+        since=args.since,
+        include_replies=not args.no_replies,
+    )
+    emit_warnings(result.warnings)
+    output = render(result.conversations, result.store, output_format=args.format)
+    if args.output:
+        Path(args.output).expanduser().write_text(output, encoding="utf-8")
+        print(f"Wrote {args.output}")
+    else:
+        sys.stdout.write(output)
+    return 0
 
 
 def build(args: argparse.Namespace) -> int:

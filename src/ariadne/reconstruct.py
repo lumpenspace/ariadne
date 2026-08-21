@@ -18,12 +18,17 @@ class ConversationBuilder:
         *,
         fetcher: TweetFetcher | None = None,
         include_quotes: bool = True,
+        quote_as_reply: bool = True,
         strict: bool = False,
         max_depth: int = 50,
     ) -> None:
         self.store = store
         self.fetcher = fetcher
         self.include_quotes = include_quotes
+        # When the first tweet of a thread is a quote-tweet (it quotes something
+        # but replies to nothing), treat the quoted tweet as its reply-parent and
+        # keep walking, so the branch continues into the quoted conversation.
+        self.quote_as_reply = quote_as_reply
         self.strict = strict
         self.max_depth = max_depth
         self.warnings: list[str] = []
@@ -36,8 +41,15 @@ class ConversationBuilder:
 
     def _build_conversation(self, target_id: str) -> Conversation:
         before = len(self.warnings)
-        path = self._build_path(target_id)
-        quotes = self._collect_quote_contexts(path, seen_quote_ids=set()) if self.include_quotes else []
+        # Quotes consumed as reply-parents (root-quote splicing) are excluded from
+        # the separate quote-context pass so they are not attached twice.
+        consumed_quotes: set[str] = set()
+        path = self._build_path(target_id, consumed_quotes=consumed_quotes)
+        quotes = (
+            self._collect_quote_contexts(path, seen_quote_ids=set(consumed_quotes))
+            if self.include_quotes
+            else []
+        )
         return Conversation(
             target_id=target_id,
             path=path,
@@ -45,7 +57,7 @@ class ConversationBuilder:
             warnings=self.warnings[before:],
         )
 
-    def _build_path(self, target_id: str) -> list[str]:
+    def _build_path(self, target_id: str, *, consumed_quotes: set[str] | None = None) -> list[str]:
         path: list[str] = []
         current_id = target_id
         seen: set[str] = set()
@@ -71,10 +83,19 @@ class ConversationBuilder:
 
             path.append(current_id)
             parent_id = tweet.reply_parent_id()
-            if not parent_id:
+            if parent_id:
+                self._add_reply_parent_stub(tweet, parent_id)
+                current_id = parent_id
+                continue
+
+            # No reply-parent: this is the first tweet of the thread. If it quotes
+            # something, follow the quote as the reply-parent (the quoted tweet
+            # becomes the branch root) and record it so it is not double-attached.
+            quote_id = self._root_quote_parent(tweet, seen, consumed_quotes)
+            if quote_id is None:
                 break
-            self._add_reply_parent_stub(tweet, parent_id)
-            current_id = parent_id
+            consumed_quotes.add(quote_id)  # type: ignore[union-attr]
+            current_id = quote_id
         else:
             self.warnings.append(
                 f"Stopped at max depth {self.max_depth} while following replies from {target_id}"
@@ -82,6 +103,13 @@ class ConversationBuilder:
 
         path.reverse()
         return path
+
+    def _root_quote_parent(
+        self, tweet: Tweet, seen: set[str], consumed_quotes: set[str] | None
+    ) -> str | None:
+        if consumed_quotes is None or not self.quote_as_reply or not self.include_quotes:
+            return None
+        return next((q for q in tweet.quote_ids() if q not in seen), None)
 
     def _collect_quote_contexts(
         self, path: list[str], *, seen_quote_ids: set[str]

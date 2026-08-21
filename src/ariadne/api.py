@@ -27,6 +27,7 @@ from .archive import load_archive
 from .fetch import FetchResult, OEmbedClient, XApiClient
 from .ids import extract_tweet_ids, extract_tweet_url_map, unique_preserve_order
 from .models import Conversation, Tweet
+from .providers import CommunityArchiveClient, TwitterApiIoClient
 from .reconstruct import ConversationBuilder
 from .render import (
     json_payload,
@@ -91,6 +92,11 @@ class BuildOptions:
     rss_url_template: list[str] = field(default_factory=list)
     max_user_pages: int | None = None
     bearer_token: str | None = None
+    # Community Archive (community-archive.org): a public pool of donated Twitter
+    # exports. Enumerates the target and completes reply/quote parents by anyone.
+    community_archive: bool = False
+    # twitterapi.io pay-as-you-go gateway; needs the caller's key.
+    twitterapi_key: str | None = None
 
     # Cache
     cache: str = DEFAULT_CACHE_PATH
@@ -100,6 +106,8 @@ class BuildOptions:
     strict: bool = False
     max_depth: int = 50
     no_quotes: bool = False
+    # Splice a root quote-tweet's quoted tweet in as its reply-parent.
+    quote_as_reply: bool = True
     allow_empty: bool = False
 
     # Output (used by the CLI; `BuildResult` can render any format on demand)
@@ -239,10 +247,35 @@ def build_conversations(
         store = base_store
         warnings = list(base_warnings or [])
     x_client = make_x_client(options)
+    community = CommunityArchiveClient() if options.community_archive else None
+    tapio_key = options.twitterapi_key or os.environ.get("TWITTERAPI_IO_KEY")
+    tapio = TwitterApiIoClient(tapio_key) if tapio_key else None
 
     if options.target_user:
         warnings.append(
             "Target-user mode is cheap-first: local/cache and unofficial RSS are tried before any X API calls."
+        )
+
+    if community is not None and target_user:
+        ca_timeline = community.get_user_posts(target_user, since=since)
+        store.add_many(ca_timeline.tweets, cacheable=True)
+        if ca_timeline.tweets:
+            warnings.append(
+                f"Community Archive supplied {len(ca_timeline.tweets)} tweet(s) for @{target_user}."
+            )
+        else:
+            warnings.append(
+                f"Community Archive has no tweets for @{target_user} (only donor accounts are covered)."
+            )
+        warnings.extend(
+            f"Community Archive: {message}" for message in ca_timeline.errors.values()
+        )
+
+    if tapio is not None and target_user:
+        tapio_timeline = tapio.get_user_posts(target_user, since=since, max_pages=options.max_user_pages)
+        store.add_many(tapio_timeline.tweets, cacheable=True)
+        warnings.extend(
+            f"twitterapi.io: {message}" for message in tapio_timeline.errors.values()
         )
 
     if use_unofficial:
@@ -340,12 +373,19 @@ def build_conversations(
     if x_client is not None and options.fetch and cheap_first:
         warnings.extend(enrich_after_cheap_sources(store, x_client, target_ids))
 
-    branch_fetcher = make_branch_fetcher(oembed=oembed, x_client=x_client, cheap_first=cheap_first)
+    branch_fetcher = make_branch_fetcher(
+        community=community,
+        tapio=tapio,
+        oembed=oembed,
+        x_client=x_client,
+        cheap_first=cheap_first,
+    )
 
     builder = ConversationBuilder(
         store,
         fetcher=branch_fetcher,
         include_quotes=not options.no_quotes,
+        quote_as_reply=options.quote_as_reply,
         strict=options.strict,
         max_depth=options.max_depth,
     )
@@ -444,10 +484,59 @@ class CheapFirstFetcher:
         return result
 
 
-def make_branch_fetcher(*, oembed: OEmbedClient | None, x_client: XApiClient | None, cheap_first: bool):
-    if oembed is not None and x_client is not None and cheap_first:
-        return CheapFirstFetcher(oembed, x_client)
-    return x_client if x_client is not None else oembed
+class ChainFetcher:
+    """Try fetchers in order, only asking the next for ids still unresolved.
+
+    An id counts as resolved once a fetcher returns it with text and marks it
+    available; partial/tombstone hits are kept but let later fetchers try to do
+    better. This is what lets Community Archive complete a reply/quote parent
+    that the target's own timeline never included.
+    """
+
+    def __init__(self, fetchers) -> None:
+        self.fetchers = [f for f in fetchers if f is not None]
+
+    def get_posts(self, ids: list[str]) -> FetchResult:
+        merged: dict[str, Tweet] = {}
+        errors: dict[str, str] = {}
+        remaining = unique_preserve_order(ids)
+        for fetcher in self.fetchers:
+            if not remaining:
+                break
+            result = fetcher.get_posts(remaining)
+            for tweet in result.tweets:
+                current = merged.get(tweet.id)
+                if current is None or (tweet.available and tweet.text and not (current.available and current.text)):
+                    merged[tweet.id] = tweet
+            errors.update(result.errors)
+            remaining = [
+                tweet_id
+                for tweet_id in remaining
+                if tweet_id not in merged or not (merged[tweet_id].available and merged[tweet_id].text)
+            ]
+        for tweet_id in merged:
+            errors.pop(tweet_id, None)
+        return FetchResult(tweets=list(merged.values()), errors=errors)
+
+
+def make_branch_fetcher(
+    *,
+    community=None,
+    tapio=None,
+    oembed: OEmbedClient | None,
+    x_client: XApiClient | None,
+    cheap_first: bool,
+):
+    if x_client is not None and oembed is not None and cheap_first:
+        paid_first = CheapFirstFetcher(oembed, x_client)
+    else:
+        paid_first = x_client if x_client is not None else oembed
+    chain = [f for f in (community, tapio, paid_first) if f is not None]
+    if not chain:
+        return None
+    if len(chain) == 1:
+        return chain[0]
+    return ChainFetcher(chain)
 
 
 def target_username(options: BuildOptions) -> str | None:
@@ -588,7 +677,11 @@ def should_save_cache(
     use_unofficial: bool,
 ) -> bool:
     return not options.no_cache and (
-        x_client is not None or oembed is not None or use_unofficial
+        x_client is not None
+        or oembed is not None
+        or use_unofficial
+        or options.community_archive
+        or bool(options.twitterapi_key or os.environ.get("TWITTERAPI_IO_KEY"))
     )
 
 

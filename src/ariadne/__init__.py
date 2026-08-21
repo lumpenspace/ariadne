@@ -12,6 +12,8 @@ See :func:`ariadne.build` and :class:`ariadne.BuildOptions`.
 
 from .api import BuildOptions, BuildResult, build, build_conversations
 from .archive import load_archive
+from .bluesky import build_bluesky
+from .providers import CommunityArchiveClient, TwitterApiIoClient
 from .models import Conversation, QuoteContext, Tweet, TweetRef
 from .render import (
     json_payload,
@@ -27,8 +29,11 @@ __all__ = [
     # Pipeline
     "build",
     "build_conversations",
+    "build_bluesky",
     "BuildOptions",
     "BuildResult",
+    "CommunityArchiveClient",
+    "TwitterApiIoClient",
     # Models
     "Conversation",
     "QuoteContext",
@@ -47,4 +52,4 @@ __all__ = [
     "json_payload",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

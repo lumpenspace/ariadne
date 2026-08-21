@@ -175,6 +175,15 @@ ariadne inspect-archive ~/Downloads/twitter-archive.zip
 - `--oembed` uses the public X oEmbed endpoint to hydrate tweet text/author/date when a canonical tweet URL is known. oEmbed does not expose reply-parent metadata, so it cannot complete a branch by itself.
 - `--unofficial-rss` tries a Nitter/XCancel-style RSS endpoint such as `https://nitter.net/{username}/rss`. `--target-user` tries both `https://nitter.net` and `https://rss.xcancel.com` (xcancel serves feeds from a dedicated host; its main host only accepts browsers) unless disabled. This is unsupported, fragile, usually limited to recent feed items, and usually omits reply-parent metadata.
 - `--rss-url-template` can add other cheap feed services, for example a hosted feed URL containing `{username}`.
+- `--community-archive` uses the [Community Archive](https://www.community-archive.org) (community-archive.org), a public pool of user-donated Twitter exports, served unauthenticated. It both enumerates the target and — unlike every other cheap source — completes reply/quote parents authored by *anyone* in the archive, so threads reconstruct across accounts without the X API. Coverage is the set of donor accounts, so it hits or misses by handle. The same donated data is also downloadable as raw archive files (a bulk dump on the project's GitHub releases, or your own `download your archive` export); those are standard Twitter-export JSON, so feed them straight to `--archive`.
+- `--twitterapi-key` (or `TWITTERAPI_IO_KEY`) uses [twitterapi.io](https://twitterapi.io), a paid pay-as-you-go gateway, as a source and branch-fetcher.
+- Quote-tweets that open a thread are, by default, treated as replies to the tweet they quote: the quoted tweet becomes the branch root and the conversation continues into it. Disable with `--no-quote-as-reply`.
+
+Bluesky is available as a separate source — its public API needs no auth and returns whole threads pre-nested:
+
+```bash
+ariadne bluesky alice.bsky.social --since 2024-01-01 --format raft
+```
 - X API fetching uses v2 Post lookup (`GET /2/tweets`) and user timeline lookup (`GET /2/users/{id}/tweets`) with `referenced_tweets.id` and author expansions, then caches responses in `.ariadne-cache.json` by default.
 - The cache avoids repeat lookups locally. X API reads may still count toward your account usage according to the current X API plan.
 - `--since` filters which user-authored tweets become branch targets. Older parent tweets are still included when needed to complete a selected branch.
