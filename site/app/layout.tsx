@@ -20,16 +20,16 @@ const michroma = Michroma({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://ariadne.hyperplex.org"),
-  title: "ariadne — follow the thread",
+  title: "ariadne — reconstruct conversations from archives",
   description:
-    "Import, search, and reconstruct complete X/Twitter conversations across local archives.",
+    "Import and search X/Twitter archives, follow known reply and quote links, and render root-to-target conversation branches.",
   icons: {
     icon: "/favicon.svg",
   },
   openGraph: {
-    title: "ariadne — follow the thread",
+    title: "ariadne — reconstruct conversations from archives",
     description:
-      "Import, search, and reconstruct complete conversations across local X/Twitter archives.",
+      "Import and search X/Twitter archives, then reconstruct the conversation branches their reply and quote links can resolve.",
     url: "https://ariadne.hyperplex.org",
     siteName: "ariadne",
     images: [
@@ -43,9 +43,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "ariadne — follow the thread",
+    title: "ariadne — reconstruct conversations from archives",
     description:
-      "Import, search, and reconstruct complete conversations across local X/Twitter archives.",
+      "Import and search X/Twitter archives, then reconstruct the conversation branches their reply and quote links can resolve.",
     images: ["/ariadne-thread-v2.png"],
   },
 };

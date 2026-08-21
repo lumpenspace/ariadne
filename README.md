@@ -1,247 +1,173 @@
-# ariadne
+<p align="center">
+  <img src="site/public/ariadne-thread-v2.png" alt="A golden conversation thread crossing several archives" width="100%">
+</p>
 
-Experimental CLI utility for turning reply tweets into complete branch context, LLM-style chat input, and Raft-ready retrieval documents.
+<h1 align="center">⌇ ariadne</h1>
 
-It can read an X/Twitter archive export (`data/tweets*.js` / `data/account.js` inside a folder or zip), generic CSV/JSON/JSONL tweet dumps, or explicit tweet IDs/URLs. It can optionally hydrate public tweet text through oEmbed, fetch missing structured metadata through X API v2, prune branches that are subsets of longer branches, and render the result as JSON, Markdown, or chat messages.
+<p align="center">
+  <strong>Find the conversation.</strong><br>
+  Turn scattered X/Twitter archives and tweet datasets into readable, attributable reply branches.
+</p>
 
-## Install
+<p align="center">
+  <a href="https://ariadne.hyperplex.org">documentation</a> ·
+  <a href="https://pypi.org/project/ariadne-x/">PyPI</a> ·
+  <a href="docs/API.md">Python API</a> ·
+  <a href="LICENSE">MIT</a>
+</p>
 
-ariadne is not on PyPI — the name belongs to the GraphQL library — so install from git:
+---
+
+A social export remembers posts. The conversation around them is often somewhere
+else: a parent in another archive, a quote in a community dataset, an older post in
+the cache.
+
+Ariadne merges those sources, selects the posts you care about, follows every known
+reply-parent chain toward its root, attaches quote context, and renders the result
+root → target.
+
+It does not pretend sparse data is complete. Missing posts stay visible as
+placeholders and warnings unless you ask for `--strict`.
+
+## Start here
+
+Requires Python 3.11 or newer. The distribution is `ariadne-x`; the command and
+import are both `ariadne`.
 
 ```bash
-pip install git+https://github.com/lumpenspace/ariadne
-```
-
-or, from a checkout:
-
-```bash
-python3 -m pip install -e .
-```
-
-Without installing, run from the repo with:
-
-```bash
-PYTHONPATH=src python3 -m ariadne --help
-```
-
-## Examples
-
-Interactive mode asks for a username and/or archive, a date, then runs a
-cheap-source pass first. It prints a summary and only then asks whether to
-continue with X API:
-
-```bash
+uv tool install ariadne-x
 ariadne interactive
 ```
 
-From an archive only:
+Or build directly from a personal archive:
 
 ```bash
-ariadne --archive ~/Downloads/twitter-archive.zip --format markdown 1234567890123456789
-```
-
-Try the included fixture:
-
-```bash
-ariadne \
-  --archive examples/fixture_archive \
+ariadne build \
+  --archive ~/Downloads/twitter-archive.zip \
+  --for-user alice \
+  --since 2024-01-01 \
   --format markdown \
-  1002
+  --output conversations.md
 ```
 
-All loaded tweets by a user since a date, including the reply branch around each selected tweet:
+That is the whole basic loop:
+
+```text
+archives + dumps + cache
+          ↓
+     choose targets
+          ↓
+follow known parent IDs
+          ↓
+ quotes + root-to-target branches
+```
+
+## Choose your path
+
+| You have… | Use… |
+| --- | --- |
+| One X/Twitter export | `ariadne build --archive PATH …` |
+| CSV, JSON, JSONL, or NDJSON | `ariadne build --tweets-file PATH …` |
+| Tweet IDs or X URLs | Pass them after `ariadne build` |
+| Archives you will reuse | `ariadne dumps import PATH` |
+| A public X account | `ariadne build --target-user USER …` |
+| A Bluesky handle | `ariadne bluesky HANDLE …` |
+
+Imported archives form a local, searchable library:
 
 ```bash
-ariadne \
-  --archive ~/Downloads/twitter-archive.zip \
-  --for-user alice \
-  --since 2024-01-01 \
-  --oembed \
-  --format openai
+ariadne dumps import ~/Downloads/twitter-archive.zip --name personal
+ariadne dumps search "remembered phrase" --user alice
+ariadne dumps show https://x.com/alice/status/1234567890123456789
+
+# Imported dumps join ordinary builds automatically.
+ariadne build --for-user alice --since 2024-01-01 --format raft -o alice.jsonl
 ```
 
-From a generic dump:
+Each import becomes a self-contained SQLite database under `~/.ariadne/dumps`.
+The source is never modified, and removing an import never removes the source.
+Parquet imports additionally need DuckDB:
 
 ```bash
-ariadne \
-  --tweets-file ./tweets.jsonl \
-  --for-user alice \
-  --since 2024-01-01 \
-  --oembed \
-  --format messages
+uv tool install 'ariadne-x[parquet]'
 ```
 
-From IDs/URLs with live fetching:
+[Read the archive library guide →](docs/DUMPS.md)
 
-```bash
-export X_BEARER_TOKEN="..."
-ariadne --fetch --format messages \
-  https://x.com/someone/status/1234567890123456789 \
-  1234567890123456790
+## From Python
+
+The CLI is a thin front end over a typed synchronous API:
+
+```python
+from pathlib import Path
+import ariadne
+
+options = ariadne.BuildOptions(
+    archive=Path.home() / "Downloads" / "twitter-archive.zip",
+    for_user="alice",
+    since="2024-01-01",
+)
+
+result = ariadne.build(options)
+
+for conversation in result:
+    print(conversation.target_id)
+
+documents = result.raft_documents()
+result.save("out/branches.jsonl", "raft")
 ```
 
-Strict OpenAI-style messages:
+Use `no_dumps=True` when a build must ignore the persistent archive library.
+Named failures derive from `AriadneError`, including `ConfigurationError`,
+`NoTargetsError`, `ReconstructionError`, and `SourceError`.
 
-```bash
-ariadne --archive archive.zip --fetch --format openai 1234567890123456789
-```
+[Read the Python API reference →](docs/API.md)
 
-Fetch the user's own timeline through X API before building:
+## Pick an output
 
-```bash
-export X_BEARER_TOKEN="..."
-ariadne \
-  --for-user alice \
-  --since 2024-01-01 \
-  --fetch-user-timeline \
-  --fetch \
-  --oembed \
-  --format openai
-```
+| Format | Shape | Good for |
+| --- | --- | --- |
+| `messages` | enriched JSON conversations | chat-like data with tweet metadata; the CLI default |
+| `openai` | reduced JSON conversations | nested `role`, `name`, and `content` messages |
+| `json` | normalized graph + tweets | analysis, provenance, and custom rendering |
+| `markdown` | text | humans, notebooks, and review |
+| `raft` | one JSON object per line | retrieval, chunking, and embedding |
 
-No dump and no X API token, trying the unofficial free RSS fallback:
+The `openai` renderer keeps Ariadne's conversation envelope; consumers extract
+`conversations[i].messages`. Role names describe position in the branch, not the
+speaker's intent.
 
-```bash
-ariadne \
-  --for-user alice \
-  --since 2024-01-01 \
-  --unofficial-rss \
-  --rss-base https://nitter.net \
-  --format json
-```
+[Inspect the schemas →](docs/SCHEMA.md)
 
-Arbitrary public target, cheap-first by default:
+## What Ariadne follows
 
-```bash
-ariadne \
-  --target-user alice \
-  --since 2024-01-01 \
-  --format raft \
-  --output data/alice-cheap-pass.jsonl
-```
+- One target's ancestor path back to its root—not sibling replies or a whole tree.
+- Older parents even when `--since` limits the starting targets.
+- Reply and quote edges across different imported dumps.
+- Quote context, with root quote-tweets spliced onto their quoted post by default.
 
-Only start from replies:
+Ordinary archive builds stay local. `--target-user` is the convenience exception: it
+tries unofficial RSS and oEmbed unless disabled. Those sources can recover recent text
+but usually cannot prove reply edges. X API reads are separately opt-in through
+`--fetch` and `--fetch-user-timeline` and may be billable.
 
-```bash
-ariadne \
-  --target-user alice \
-  --replies-only \
-  --since 2024-01-01 \
-  --format raft
-```
+[Read the source and network policy →](docs/SOURCES.md)
 
-Arbitrary public target, but allow paid X API only after RSS/oEmbed/cache have
-been tried:
-
-```bash
-export X_BEARER_TOKEN="..."
-ariadne \
-  --target-user alice \
-  --since 2024-01-01 \
-  --fetch \
-  --fetch-user-timeline \
-  --max-user-pages 2 \
-  --format raft
-```
-
-Archive-only interactive runs can leave the username blank; ariadne will
-use the archive account when it can infer one, otherwise it selects all loaded
-tweets on or after `--since`.
-
-Raft-ready JSONL:
-
-```bash
-ariadne \
-  --archive ~/Downloads/twitter-archive.zip \
-  --for-user alice \
-  --since 2020-01-01 \
-  --oembed \
-  --format raft \
-  --output data/alice-tweet-conversations.jsonl
-```
-
-Inspect what an archive contributes:
+## A few useful commands
 
 ```bash
 ariadne inspect-archive ~/Downloads/twitter-archive.zip
-```
+ariadne dumps interactive
+ariadne build --help
 
-## Notes
-
-- This is alpha software. It is designed to be clear about source quality and failure modes, not to promise complete reconstruction from incomplete public data.
-- `--target-user` is the convenience mode for arbitrary public accounts. It uses local cache/archive data, unofficial RSS, and oEmbed before any X API reads. Add `--fetch --fetch-user-timeline` only when you are ready to spend official API reads.
-- `--replies-only` only uses tweets with actual reply-parent metadata as starting targets. Archive files, generic dumps, and X API can provide that; cheap RSS/oEmbed usually cannot, so strict reply-only runs may find no starts until X API is allowed.
-- Live X API fetching is opt-in via `--fetch` and `--fetch-user-timeline`; without it, missing posts are represented as unavailable placeholders.
-- `--oembed` uses the public X oEmbed endpoint to hydrate tweet text/author/date when a canonical tweet URL is known. oEmbed does not expose reply-parent metadata, so it cannot complete a branch by itself.
-- `--unofficial-rss` tries a Nitter/XCancel-style RSS endpoint such as `https://nitter.net/{username}/rss`. `--target-user` tries both `https://nitter.net` and `https://rss.xcancel.com` (xcancel serves feeds from a dedicated host; its main host only accepts browsers) unless disabled. This is unsupported, fragile, usually limited to recent feed items, and usually omits reply-parent metadata.
-- `--rss-url-template` can add other cheap feed services, for example a hosted feed URL containing `{username}`.
-- `--community-archive` uses the [Community Archive](https://www.community-archive.org) (community-archive.org), a public pool of user-donated Twitter exports, served unauthenticated. It both enumerates the target and — unlike every other cheap source — completes reply/quote parents authored by *anyone* in the archive, so threads reconstruct across accounts without the X API. Coverage is the set of donor accounts, so it hits or misses by handle. The same donated data is also downloadable as raw archive files (a bulk dump on the project's GitHub releases, or your own `download your archive` export); those are standard Twitter-export JSON, so feed them straight to `--archive`.
-- `--twitterapi-key` (or `TWITTERAPI_IO_KEY`) uses [twitterapi.io](https://twitterapi.io), a paid pay-as-you-go gateway, as a source and branch-fetcher.
-- Quote-tweets that open a thread are, by default, treated as replies to the tweet they quote: the quoted tweet becomes the branch root and the conversation continues into it. Disable with `--no-quote-as-reply`.
-
-Bluesky is available as a separate source — its public API needs no auth and returns whole threads pre-nested:
-
-```bash
+# Bluesky uses its public API and the same renderers.
 ariadne bluesky alice.bsky.social --since 2024-01-01 --format raft
 ```
-- X API fetching uses v2 Post lookup (`GET /2/tweets`) and user timeline lookup (`GET /2/users/{id}/tweets`) with `referenced_tweets.id` and author expansions, then caches responses in `.ariadne-cache.json` by default.
-- The cache avoids repeat lookups locally. X API reads may still count toward your account usage according to the current X API plan.
-- `--since` filters which user-authored tweets become branch targets. Older parent tweets are still included when needed to complete a selected branch.
-- Reply reconstruction follows only the branch from the target reply back to its root. Sibling replies are intentionally not pulled in.
-- Quote references are attached as quote contexts. If a quoted post is itself a reply, its branch is reconstructed too.
 
-## Output Shape
+## Reference
 
-`--format messages` returns:
-
-```json
-{
-  "format": "messages",
-  "conversations": [
-    {
-      "target_id": "123",
-      "messages": [
-        {
-          "role": "assistant",
-          "name": "original_author",
-          "content": "Root tweet text",
-          "tweet_id": "1"
-        },
-        {
-          "role": "user",
-          "name": "participant",
-          "content": "Reply text",
-          "tweet_id": "123"
-        }
-      ]
-    }
-  ]
-}
-```
-
-The first tweet in the reconstructed branch is role `assistant`; later branch posts are role `user` with participant names when available.
-
-## Python API
-
-Everything the `build` command does is callable directly, and rendering is
-available as parsed data rather than only as text:
-
-```python
-import ariadne
-
-result = ariadne.build(archive="~/twitter-archive.zip", for_user="alice")
-
-for document in result.raft_documents():   # list[dict], no file round-trip
-    print(document["metadata"]["target_id"])
-
-result.save("branches.jsonl", "raft")
-```
-
-Keyword names are the CLI flags with dashes as underscores. Full reference in
-[docs/API.md](docs/API.md).
-
-See also:
-
+- [Documentation site](https://ariadne.hyperplex.org)
+- [Persistent archive library](docs/DUMPS.md)
 - [Python API](docs/API.md)
 - [Source behavior](docs/SOURCES.md)
 - [Output schemas](docs/SCHEMA.md)
@@ -249,10 +175,11 @@ See also:
 
 ## Development
 
-[uv](https://docs.astral.sh/uv/) manages the environment:
-
 ```bash
-uv sync --extra dev
+uv sync --extra dev --extra parquet
 uv run pytest
 uv run ruff check .
+uv run mypy src
 ```
+
+MIT licensed. The thread was there all along.

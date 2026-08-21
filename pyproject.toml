@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ariadne"
+name = "ariadne-x"
 dynamic = ["version"]
 description = "Reconstruct reply branches from X/Twitter archives or IDs and render them as LLM chat inputs."
 readme = "README.md"
@@ -24,6 +24,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Topic :: Text Processing",
+  "Typing :: Typed",
 ]
 
 [project.urls]
@@ -35,13 +36,24 @@ Issues = "https://github.com/lumpenspace/ariadne/issues"
 ariadne = "ariadne.cli:main"
 
 [project.optional-dependencies]
-dev = ["build>=1.2", "pytest>=8.0", "ruff>=0.8"]
+# Reading parquet dumps (`ariadne dumps import`) needs duckdb.
+parquet = ["duckdb>=1.1"]
+dev = ["build>=1.2", "pytest>=8.0", "ruff>=0.8", "duckdb>=1.1"]
 
 [tool.hatch.version]
 path = "src/ariadne/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ariadne"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.pytest_cache",
+  "/.ruff_cache",
+  "/.venv",
+  "/dist",
+  "/site",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

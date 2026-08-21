@@ -5,6 +5,7 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from ._types import OutputFormat
 from .models import Conversation, QuoteContext, Tweet
 from .store import TweetStore
 
@@ -13,7 +14,7 @@ def render(
     conversations: list[Conversation],
     store: TweetStore,
     *,
-    output_format: str,
+    output_format: OutputFormat,
 ) -> str:
     if output_format == "json":
         return render_json(conversations, store)
@@ -65,7 +66,7 @@ def message_conversations(
             quote_contexts = quote_map.get(tweet_id, [])
             if quote_contexts:
                 content = "\n\n".join([content] + [_quote_block(context, store) for context in quote_contexts])
-            message = {
+            message: dict[str, Any] = {
                 "role": "assistant" if index == 0 else "user",
                 "name": message_name(tweet, fallback=tweet_id),
                 "content": content,

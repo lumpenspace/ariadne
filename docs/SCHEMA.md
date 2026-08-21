@@ -1,6 +1,6 @@
 # Output Schemas
 
-ariadne currently emits four families of output.
+ariadne currently emits five families of output.
 
 ## `json`
 
@@ -18,6 +18,12 @@ Conversation output with OpenAI-like roles plus tweet metadata. The first branch
 
 Strict message objects with `role`, `name`, and `content` only.
 
+## `markdown`
+
+A human-readable conversation view. Each branch is headed by its target ID and
+renders the root-to-target path, author attribution, unavailable placeholders,
+quote context, and warnings without exposing the normalized store separately.
+
 ## `raft`
 
 JSONL documents intended for retrieval, chunking, and future RAFT ingestion. Each line is one reconstructed conversation:
@@ -31,12 +37,39 @@ JSONL documents intended for retrieval, chunking, and future RAFT ingestion. Eac
   "text": "@alice: root tweet\n\n@bob: reply tweet",
   "metadata": {
     "target_id": "1002",
+    "target_author": "@bob",
+    "target_created_at": "2024-01-02T12:00:00Z",
+    "target_url": "https://x.com/bob/status/1002",
     "tweet_ids": ["1001", "1002"],
-    "participants": ["@alice", "@bob"]
+    "all_tweet_ids": ["1001", "1002"],
+    "participants": ["@alice", "@bob"],
+    "quote_count": 0,
+    "warnings": []
   },
-  "messages": []
+  "messages": [
+    {
+      "role": "assistant",
+      "tweet_id": "1001",
+      "author": "@alice",
+      "username": "alice",
+      "created_at": "2024-01-01T12:00:00Z",
+      "url": "https://x.com/alice/status/1001",
+      "text": "root tweet"
+    },
+    {
+      "role": "participant",
+      "tweet_id": "1002",
+      "author": "@bob",
+      "username": "bob",
+      "created_at": "2024-01-02T12:00:00Z",
+      "url": "https://x.com/bob/status/1002",
+      "text": "reply tweet"
+    }
+  ],
+  "quotes": []
 }
 ```
 
-The `text` field is optimized for retrieval and embedding. The structured fields preserve provenance.
-
+The `text` field is optimized for retrieval and embedding. `messages` keeps
+per-post attribution and timestamps, `quotes` preserves attached quote paths,
+and the metadata fields keep selection, dedupe, and warning provenance.

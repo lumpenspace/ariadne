@@ -21,14 +21,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, TypedDict, Unpack, overload
 
+from ._types import OutputFormat, PathInput
 from .archive import load_archive
+from .dumps import LocalDumpsClient
+from .errors import ConfigurationError, NoTargetsError
 from .fetch import FetchResult, OEmbedClient, XApiClient
 from .ids import extract_tweet_ids, extract_tweet_url_map, unique_preserve_order
 from .models import Conversation, Tweet
 from .providers import CommunityArchiveClient, TwitterApiIoClient
-from .reconstruct import ConversationBuilder
+from .reconstruct import ConversationBuilder, TweetFetcher
 from .render import (
     json_payload,
     message_conversations,
@@ -41,8 +44,11 @@ from .timeutil import is_on_or_after, parse_since
 from .unofficial import NitterRssClient
 
 __all__ = [
+    "BuildKwargs",
     "BuildOptions",
     "BuildResult",
+    "OutputFormat",
+    "PathInput",
     "build",
     "build_conversations",
     "DEFAULT_RSS_BASES",
@@ -51,8 +57,99 @@ __all__ = [
 DEFAULT_RSS_BASES = ("https://nitter.net", "https://rss.xcancel.com")
 
 DEFAULT_CACHE_PATH = ".ariadne-cache.json"
+DEFAULT_MAX_LOCAL_POSTS = 10_000
 
-_LIST_FIELDS = ("items", "input_file", "archive", "tweets_file", "rss_url_template")
+StringValues = str | Iterable[str] | None
+PathValues = PathInput | Iterable[PathInput] | None
+_OUTPUT_FORMATS = ("messages", "openai", "json", "markdown", "raft")
+
+_STRING_LIST_FIELDS = ("items", "rss_url_template", "dump")
+_PATH_LIST_FIELDS = ("input_file", "archive", "tweets_file")
+
+
+class BuildKwargs(TypedDict, total=False):
+    """Typed keyword arguments accepted by :func:`build`.
+
+    Multi-value inputs accept either one value or any iterable of values. Path
+    inputs additionally accept :class:`os.PathLike` objects such as
+    :class:`pathlib.Path`.
+    """
+
+    items: StringValues
+    input_file: PathValues
+    archive: PathValues
+    tweets_file: PathValues
+    for_user: str | None
+    target_user: str | None
+    author_id: str | None
+    all_loaded: bool
+    replies_only: bool
+    since: str | None
+    cheap_first: bool
+    oembed: bool
+    no_oembed: bool
+    hydrate_all: bool
+    fetch: bool
+    fetch_user_timeline: bool
+    unofficial_rss: bool
+    no_unofficial_rss: bool
+    rss_base: StringValues
+    rss_url_template: StringValues
+    max_user_pages: int | None
+    bearer_token: str | None
+    community_archive: bool
+    twitterapi_key: str | None
+    dump: StringValues
+    no_dumps: bool
+    dump_limit: int | None
+    cache: PathInput
+    no_cache: bool
+    strict: bool
+    max_depth: int
+    no_quotes: bool
+    quote_as_reply: bool
+    allow_empty: bool
+    format: OutputFormat
+    output: PathInput | None
+
+
+def _normalize_values(
+    value: object,
+    *,
+    name: str,
+    path_values: bool = False,
+) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (str, os.PathLike)):
+        values = [value]
+    else:
+        if not isinstance(value, Iterable):
+            expected = (
+                "a path or an iterable of paths"
+                if path_values
+                else "a string or an iterable of strings"
+            )
+            raise TypeError(f"{name} must be {expected}")
+        try:
+            values = list(value)
+        except TypeError as exc:
+            expected = (
+                "a path or an iterable of paths"
+                if path_values
+                else "a string or an iterable of strings"
+            )
+            raise TypeError(f"{name} must be {expected}") from exc
+
+    normalized: list[str] = []
+    for item in values:
+        if path_values and isinstance(item, os.PathLike):
+            item = os.fspath(item)
+        if not isinstance(item, str):
+            expected = "path-like values" if path_values else "strings"
+            raise TypeError(f"{name} must contain only {expected}")
+        normalized.append(item)
+    return normalized
 
 
 @dataclass
@@ -64,6 +161,12 @@ class BuildOptions:
     fields accept a bare string for convenience: ``archive="a.zip"`` is the
     same as ``archive=["a.zip"]``.
     """
+
+    if TYPE_CHECKING:
+        # Dataclasses generate the runtime constructor. This declaration gives
+        # type checkers the wider, normalized input contract while keeping the
+        # stored attributes precisely typed as lists below.
+        def __init__(self, **kwargs: Unpack[BuildKwargs]) -> None: ...
 
     # Inputs
     items: list[str] = field(default_factory=list)
@@ -91,12 +194,19 @@ class BuildOptions:
     rss_base: list[str] | None = None
     rss_url_template: list[str] = field(default_factory=list)
     max_user_pages: int | None = None
-    bearer_token: str | None = None
+    bearer_token: str | None = field(default=None, repr=False)
     # Community Archive (community-archive.org): a public pool of donated Twitter
     # exports. Enumerates the target and completes reply/quote parents by anyone.
     community_archive: bool = False
     # twitterapi.io pay-as-you-go gateway; needs the caller's key.
-    twitterapi_key: str | None = None
+    twitterapi_key: str | None = field(default=None, repr=False)
+    # Imported local dumps (`ariadne dumps import`) are read automatically when
+    # present; `dump` restricts to the named ones, `no_dumps` disables them.
+    dump: list[str] = field(default_factory=list)
+    no_dumps: bool = False
+    # Safety bound for one user/author timeline read from local dumps. When
+    # omitted, timelines above DEFAULT_MAX_LOCAL_POSTS require an explicit cap.
+    dump_limit: int | None = None
 
     # Cache
     cache: str = DEFAULT_CACHE_PATH
@@ -111,20 +221,51 @@ class BuildOptions:
     allow_empty: bool = False
 
     # Output (used by the CLI; `BuildResult` can render any format on demand)
-    format: str = "messages"
+    format: OutputFormat = "messages"
     output: str | None = None
 
     def __post_init__(self) -> None:
-        for name in _LIST_FIELDS:
+        for name in _STRING_LIST_FIELDS:
+            setattr(self, name, _normalize_values(getattr(self, name), name=name))
+        for name in _PATH_LIST_FIELDS:
+            setattr(
+                self,
+                name,
+                _normalize_values(getattr(self, name), name=name, path_values=True),
+            )
+        if self.rss_base is not None:
+            self.rss_base = _normalize_values(self.rss_base, name="rss_base")
+        if isinstance(self.cache, os.PathLike):
+            self.cache = os.fspath(self.cache)
+        if isinstance(self.output, os.PathLike):
+            self.output = os.fspath(self.output)
+
+    def validate(self) -> None:
+        """Validate combinations that argparse normally checks for the CLI."""
+        for name in ("max_depth", "max_user_pages", "dump_limit"):
             value = getattr(self, name)
-            if value is None:
-                setattr(self, name, [])
-            elif isinstance(value, str):
-                setattr(self, name, [value])
-            elif not isinstance(value, list):
-                setattr(self, name, list(value))
-        if isinstance(self.rss_base, str):
-            self.rss_base = [self.rss_base]
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ConfigurationError(f"{name} must be a positive integer")
+        if self.format not in _OUTPUT_FORMATS:
+            choices = ", ".join(_OUTPUT_FORMATS)
+            raise ConfigurationError(f"format must be one of: {choices}")
+        if self.oembed and self.no_oembed:
+            raise ConfigurationError("oembed and no_oembed cannot both be enabled")
+        if self.unofficial_rss and self.no_unofficial_rss:
+            raise ConfigurationError(
+                "unofficial_rss and no_unofficial_rss cannot both be enabled"
+            )
+        if self.dump and self.no_dumps:
+            raise ConfigurationError("dump and no_dumps cannot be used together")
+        if self.for_user and self.target_user:
+            selected = self.for_user.strip().strip("@").lower()
+            target = self.target_user.strip().strip("@").lower()
+            if selected != target:
+                raise ConfigurationError(
+                    "for_user and target_user cannot select different users"
+                )
 
     @classmethod
     def coerce(cls, options: "BuildOptions | Any") -> "BuildOptions":
@@ -166,10 +307,10 @@ class BuildResult:
     def __bool__(self) -> bool:
         return bool(self.conversations)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Conversation]:
         return iter(self.conversations)
 
-    def render(self, output_format: str | None = None) -> str:
+    def render(self, output_format: OutputFormat | None = None) -> str:
         """Render to text in any supported format."""
         return render(
             self.conversations,
@@ -191,46 +332,112 @@ class BuildResult:
         """The full ``ariadne.json.v1`` payload as a dict."""
         return json_payload(self.conversations, self.store)
 
-    def save(self, path: str | Path, output_format: str | None = None) -> Path:
+    def save(
+        self,
+        path: PathInput,
+        output_format: OutputFormat | None = None,
+    ) -> Path:
         """Render to `path`, inferring the format from the CLI default."""
         destination = Path(path).expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(self.render(output_format), encoding="utf-8")
         return destination
 
-    def save_cache(self, path: str | Path | None = None, *, force: bool = False) -> Path | None:
+    def save_cache(
+        self,
+        path: PathInput | None = None,
+        *,
+        force: bool = False,
+    ) -> Path | None:
         """Persist fetched/hydrated tweets, if this run fetched anything."""
         if not (force or self.should_save_cache):
             return None
         target = path or (self.options.cache if self.options else DEFAULT_CACHE_PATH)
-        save_cache(target, self.store.cacheable_tweets())
-        return Path(target).expanduser()
+        target_path = Path(target).expanduser()
+        save_cache(target_path, self.store.cacheable_tweets())
+        return target_path
 
-    def _default_format(self) -> str:
+    def _default_format(self) -> OutputFormat:
         return self.options.format if self.options else "messages"
 
 
-def build(**kwargs: Any) -> BuildResult:
-    """Build conversations from keyword options.
+@overload
+def build(options: BuildOptions, /) -> BuildResult: ...
+
+
+@overload
+def build(**kwargs: Unpack[BuildKwargs]) -> BuildResult: ...
+
+
+def build(options: BuildOptions | None = None, /, **kwargs: Any) -> BuildResult:
+    """Build conversations from options or typed keyword arguments.
 
         result = ariadne.build(archive="archive.zip", for_user="alice",
                                since="2024-01-01")
 
+        options = BuildOptions(archive=["archive.zip"], for_user="alice")
+        result = ariadne.build(options)
+
     See :class:`BuildOptions` for the full set of knobs.
     """
+    if options is not None:
+        if kwargs:
+            raise ConfigurationError(
+                "build() accepts either one BuildOptions object or keyword options, not both"
+            )
+        if not isinstance(options, BuildOptions):
+            raise ConfigurationError(
+                "the positional build() argument must be a BuildOptions object"
+            )
+        return build_conversations(options)
     return build_conversations(BuildOptions(**kwargs))
 
 
 def build_conversations(
-    options: BuildOptions | Any,
+    options: BuildOptions,
     *,
     base_store: TweetStore | None = None,
     base_warnings: list[str] | None = None,
 ) -> BuildResult:
-    """Run the full source → select → reconstruct → hydrate pipeline."""
-    options = BuildOptions.coerce(options)
+    """Run the full source → select → reconstruct → hydrate pipeline.
 
-    since = parse_since(options.since)
+    ``base_store`` is reused and mutated in place, allowing a second build to
+    continue from an earlier result without loading its tweets again.
+    """
+    options = BuildOptions.coerce(options)
+    options.validate()
+    if base_warnings is not None and base_store is None:
+        raise ConfigurationError("base_warnings requires base_store")
+    local_dumps = make_dumps_client(options)
+    if local_dumps is None:
+        return _run_build(
+            options,
+            base_store=base_store,
+            base_warnings=base_warnings,
+            local_dumps=None,
+        )
+    with local_dumps:
+        return _run_build(
+            options,
+            base_store=base_store,
+            base_warnings=base_warnings,
+            local_dumps=local_dumps,
+        )
+
+
+def _run_build(
+    options: BuildOptions,
+    *,
+    base_store: TweetStore | None,
+    base_warnings: list[str] | None,
+    local_dumps: LocalDumpsClient | None,
+) -> BuildResult:
+    """Pipeline implementation with externally managed source lifetimes."""
+
+    try:
+        since = parse_since(options.since)
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
     input_values = collect_input_values(options.items, options.input_file)
     target_ids = extract_tweet_ids(input_values)
     url_by_id = extract_tweet_url_map(input_values)
@@ -256,6 +463,47 @@ def build_conversations(
             "Target-user mode is cheap-first: local/cache and unofficial RSS are tried before any X API calls."
         )
 
+    if local_dumps is not None:
+        # Enrich already-loaded targets too: a cache/oEmbed hit can have text
+        # while still lacking the reply/quote metadata held by a local dump.
+        dump_lookup_ids = list(target_ids)
+        if options.all_loaded:
+            dump_lookup_ids.extend(tweet.id for tweet in store.all())
+        if dump_lookup_ids:
+            store.add_many(local_dumps.get_posts(unique_preserve_order(dump_lookup_ids)).tweets)
+
+    if local_dumps is not None and target_user:
+        query_limit = _local_dump_query_limit(options)
+        dump_timeline = local_dumps.get_user_posts(target_user, since=since, limit=query_limit)
+        dump_tweets, limit_warning = _bounded_local_dump_tweets(
+            dump_timeline.tweets, options, f"@{target_user}"
+        )
+        store.add_many(dump_tweets)
+        if dump_tweets:
+            warnings.append(
+                f"Local dumps ({', '.join(local_dumps.dump_names())}) supplied "
+                f"{len(dump_tweets)} tweet(s) for @{target_user}."
+            )
+        if limit_warning:
+            warnings.append(limit_warning)
+
+    if local_dumps is not None and options.author_id:
+        query_limit = _local_dump_query_limit(options)
+        dump_author_timeline = local_dumps.get_author_posts(
+            options.author_id, since=since, limit=query_limit
+        )
+        dump_author_tweets, limit_warning = _bounded_local_dump_tweets(
+            dump_author_timeline.tweets, options, f"author {options.author_id}"
+        )
+        store.add_many(dump_author_tweets)
+        if dump_author_tweets:
+            warnings.append(
+                f"Local dumps ({', '.join(local_dumps.dump_names())}) supplied "
+                f"{len(dump_author_tweets)} tweet(s) for author {options.author_id}."
+            )
+        if limit_warning:
+            warnings.append(limit_warning)
+
     if community is not None and target_user:
         ca_timeline = community.get_user_posts(target_user, since=since)
         store.add_many(ca_timeline.tweets, cacheable=True)
@@ -280,7 +528,7 @@ def build_conversations(
 
     if use_unofficial:
         if not target_user:
-            raise RuntimeError("unofficial_rss requires for_user or target_user")
+            raise ConfigurationError("unofficial_rss requires for_user or target_user")
         fetch_unofficial_timelines(store, warnings, options, target_user, since)
 
     if target_user or options.author_id or options.all_loaded:
@@ -318,9 +566,11 @@ def build_conversations(
 
     if options.fetch_user_timeline:
         if not target_user:
-            raise RuntimeError("fetch_user_timeline requires for_user or target_user")
+            raise ConfigurationError("fetch_user_timeline requires for_user or target_user")
         if x_client is None:
-            raise RuntimeError("fetch_user_timeline requires fetch=True or a bearer_token")
+            raise ConfigurationError(
+                "fetch_user_timeline requires fetch=True or a bearer_token"
+            )
         if cheap_first or use_unofficial:
             warnings.append(
                 "Using X API user timeline only after cheap/local timeline sources have finished."
@@ -366,7 +616,7 @@ def build_conversations(
                 ),
                 options=options,
             )
-        raise RuntimeError(message)
+        raise NoTargetsError(message)
 
     oembed = OEmbedClient(url_by_id=url_by_id, tweet_lookup=store.get) if use_oembed else None
 
@@ -374,6 +624,7 @@ def build_conversations(
         warnings.extend(enrich_after_cheap_sources(store, x_client, target_ids))
 
     branch_fetcher = make_branch_fetcher(
+        dumps=local_dumps,
         community=community,
         tapio=tapio,
         oembed=oembed,
@@ -426,14 +677,14 @@ def load_store(options: BuildOptions) -> tuple[TweetStore, list[str]]:
         store.add_many(load_cache(options.cache), cacheable=True)
 
     for archive_path in options.archive:
-        result = load_archive(archive_path)
-        store.add_many(result.tweets)
-        warnings.extend(result.warnings)
+        archive_result = load_archive(archive_path)
+        store.add_many(archive_result.tweets)
+        warnings.extend(archive_result.warnings)
 
     for tweets_path in options.tweets_file:
-        result = load_tweets_file(tweets_path)
-        store.add_many(result.tweets)
-        warnings.extend(result.warnings)
+        source_result = load_tweets_file(tweets_path)
+        store.add_many(source_result.tweets)
+        warnings.extend(source_result.warnings)
     return store, warnings
 
 
@@ -445,7 +696,7 @@ def make_x_client(options: BuildOptions) -> XApiClient | None:
     )
     if not token:
         if options.fetch:
-            raise RuntimeError(
+            raise ConfigurationError(
                 "fetch=True requires bearer_token, X_BEARER_TOKEN, or TWITTER_BEARER_TOKEN"
             )
         return None
@@ -519,19 +770,57 @@ class ChainFetcher:
         return FetchResult(tweets=list(merged.values()), errors=errors)
 
 
+def make_dumps_client(options: BuildOptions) -> LocalDumpsClient | None:
+    """The local-dump client for this build, or None when disabled/empty."""
+    if options.no_dumps:
+        return None
+    client = LocalDumpsClient(names=options.dump or None)
+    return client if client.available() else None
+
+
+def _local_dump_query_limit(options: BuildOptions) -> int:
+    if options.dump_limit is not None and (
+        isinstance(options.dump_limit, bool)
+        or not isinstance(options.dump_limit, int)
+        or options.dump_limit < 1
+    ):
+        raise ConfigurationError("dump_limit must be a positive integer")
+    return (options.dump_limit or DEFAULT_MAX_LOCAL_POSTS) + 1
+
+
+def _bounded_local_dump_tweets(
+    tweets: list[Tweet], options: BuildOptions, subject: str
+) -> tuple[list[Tweet], str | None]:
+    cap = options.dump_limit or DEFAULT_MAX_LOCAL_POSTS
+    if len(tweets) <= cap:
+        return tweets, None
+    if options.dump_limit is None:
+        raise ConfigurationError(
+            f"Local dumps contain more than {cap:,} posts for {subject}; "
+            "narrow the timeline with since/--since or explicitly choose a maximum "
+            "with dump_limit/--dump-limit"
+        )
+    return (
+        tweets[:cap],
+        f"Local dump timeline for {subject} was limited to the newest {cap:,} post(s).",
+    )
+
+
 def make_branch_fetcher(
     *,
-    community=None,
-    tapio=None,
+    dumps: TweetFetcher | None = None,
+    community: TweetFetcher | None = None,
+    tapio: TweetFetcher | None = None,
     oembed: OEmbedClient | None,
     x_client: XApiClient | None,
     cheap_first: bool,
-):
+) -> TweetFetcher | None:
+    paid_first: TweetFetcher | None
     if x_client is not None and oembed is not None and cheap_first:
         paid_first = CheapFirstFetcher(oembed, x_client)
     else:
         paid_first = x_client if x_client is not None else oembed
-    chain = [f for f in (community, tapio, paid_first) if f is not None]
+    chain = [f for f in (dumps, community, tapio, paid_first) if f is not None]
     if not chain:
         return None
     if len(chain) == 1:

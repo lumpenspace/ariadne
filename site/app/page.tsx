@@ -1,591 +1,456 @@
-"use client";
+import Image from "next/image";
 
-import { useEffect, useState } from "react";
-
-type DemoStep = {
-  id: string;
-  number: string;
-  title: string;
-  summary: string;
-  command: string;
-  output: string[];
-};
-
-const demoSteps: DemoStep[] = [
-  {
-    id: "import",
-    number: "01",
-    title: "Import",
-    summary: "Normalize archives once, then keep the originals out of the hot path.",
-    command: "ariadne dumps import ~/DATA/tpot_dump --name tpot",
-    output: [
-      "◆ detecting parquet",
-      "◆ indexing 24,402,299 posts",
-      "✓ saved as tpot",
-    ],
-  },
-  {
-    id: "index",
-    number: "02",
-    title: "Index",
-    summary: "Store text, identities, reply edges, quotes, and full-text search locally.",
-    command: "ariadne dumps list",
-    output: [
-      "personal   14,982 posts",
-      "community  382,685 posts",
-      "tpot       24,402,299 posts",
-    ],
-  },
-  {
-    id: "explore",
-    number: "03",
-    title: "Explore",
-    summary: "Search every imported archive together, or narrow the scope deliberately.",
-    command: "ariadne dumps search 'golden thread' --user alice",
-    output: [
-      "◆ searching all archives",
-      "✓ 3 matches · 2 archives",
-      "» show 189331742…",
-    ],
-  },
-  {
-    id: "reconstruct",
-    number: "04",
-    title: "Reconstruct",
-    summary: "Follow reply parents and quote context across archive boundaries.",
-    command: "ariadne build --for-user alice --since 2024-01-01",
-    output: [
-      "◆ selected 152 starting posts",
-      "◆ following cross-archive parents",
-      "✓ 141 complete branches",
-    ],
-  },
-  {
-    id: "render",
-    number: "05",
-    title: "Render",
-    summary: "Turn complete branches into reading views, graphs, chat, or Raft documents.",
-    command: "ariadne build --for-user alice --format raft -o alice.jsonl",
-    output: [
-      "◆ pruning duplicate subsets",
-      "◆ attaching quote context",
-      "✓ wrote alice.jsonl",
-    ],
-  },
-];
-
-const toc = [
-  ["what", "What it does"],
-  ["install", "Install"],
-  ["archives", "Archive library"],
-  ["explore", "Explore"],
-  ["reconstruct", "Reconstruct"],
-  ["outputs", "Outputs & API"],
-  ["sources", "Source truth"],
-];
+const sections = [
+  ["quickstart", "Quickstart"],
+  ["workflows", "Choose an input"],
+  ["reconstruction", "How it works"],
+  ["library", "Archive library"],
+  ["sources", "Network sources"],
+  ["outputs", "Output formats"],
+  ["python", "Python API"],
+  ["troubleshooting", "Troubleshooting"],
+] as const;
 
 const archiveKinds = [
-  ["Personal export", "Folder or ZIP", "Tweets, authorship, replies, quotes"],
-  ["Community Archive", "CSV folder or ZIP", "Many donated accounts and their links"],
-  ["Parquet collection", "Directory", "Bulk datasets such as TPOT"],
-  ["Generic dump", "CSV, JSON, JSONL", "Mapped tweet-like records"],
-];
+  ["Personal X/Twitter archive", "folder, ZIP, or archive data file", "twitter-archive"],
+  ["Community Archive export", "CSV directory or ZIP", "community-csv"],
+  ["Parquet collection", "one .parquet file or a directory", "parquet"],
+  ["Generic tweet dump", "CSV, JSON, JSONL, or NDJSON", "tweets-file"],
+] as const;
 
 const sourceRows = [
-  ["Imported dumps", "text + structure", "local", "automatic"],
-  ["One-shot archive", "text + structure", "local", "explicit"],
-  ["Cache", "previously resolved records", "local", "automatic"],
-  ["Community Archive", "text + structure", "network", "opt-in"],
-  ["oEmbed / Nitter / XCancel", "mostly text", "network", "opt-in"],
-  ["X API / twitterapi.io", "text + structure", "network", "opt-in"],
-];
+  ["Local archives and dumps", "yes, when present", "yes, when present", "Automatic"],
+  ["Community Archive", "donor accounts", "yes", "--community-archive"],
+  ["oEmbed", "no", "no; content only", "--oembed or --target-user"],
+  ["Nitter / XCancel RSS", "recent candidates", "usually no", "--unofficial-rss or --target-user"],
+  ["twitterapi.io", "yes", "yes", "API key; potentially paid"],
+  ["X API v2", "yes with timeline fetch", "yes", "Bearer token; potentially billable"],
+] as const;
 
-function CodeBlock({ children }: { children: string }) {
-  const [copied, setCopied] = useState(false);
+const outputRows = [
+  ["messages", "JSON", "Enriched chat-like messages with tweet metadata. This is the CLI default."],
+  ["openai", "JSON", "The same conversation envelope, with each nested message reduced to role, name, and content."],
+  ["json", "JSON", "Normalized tweets, root-to-target branches, quote paths, warnings, and provenance."],
+  ["markdown", "Text", "A readable view with attribution, unavailable placeholders, quotes, and warnings."],
+  ["raft", "JSONL", "One retrieval document per retained branch, ready for chunking or embedding."],
+] as const;
 
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(children);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1400);
-    } catch {
-      setCopied(false);
-    }
-  }
-
+function CodeBlock({ label, children }: { label: string; children: string }) {
   return (
-    <div className="codeBlock">
-      <pre>
+    <figure className="codeBlock">
+      <figcaption>{label}</figcaption>
+      <pre tabIndex={0}>
         <code>{children}</code>
       </pre>
-      <button type="button" onClick={copy} aria-label="Copy command">
-        {copied ? "copied" : "copy"}
-      </button>
-    </div>
+    </figure>
   );
 }
 
-function ThreadLab({ step }: { step: DemoStep }) {
-  const [drawerOpen, setDrawerOpen] = useState(false);
-
+function OnThisPage({ compact = false }: { compact?: boolean }) {
   return (
-    <aside className={`lab${drawerOpen ? " open" : ""}`} aria-label="Ariadne thread lab">
-      <button
-        className="labTab"
-        type="button"
-        onClick={() => setDrawerOpen((value) => !value)}
-        aria-expanded={drawerOpen}
-      >
-        <span className="threadSigil">⌇</span>
-        thread lab
-        <span className="labTabState">{step.number} / 05</span>
-      </button>
-      <div className="labModule" data-stage={step.id}>
-        <div className="labHeader">
-          <span>┌─[ live branch ]</span>
-          <span>[ {step.number} / 05 ]─┐</span>
-        </div>
-
-        <div className="archiveMap" aria-label="A reply branch resolved across three archives">
-          <div className="mapGrid" aria-hidden="true" />
-          <div className="archiveBadge badgePersonal">personal</div>
-          <div className="archiveBadge badgeCommunity">community</div>
-          <div className="archiveBadge badgeTpot">tpot</div>
-
-          <article className="tweetNode nodeTarget">
-            <span className="nodeDot" />
-            <div>
-              <b>@alice</b>
-              <p>the piece I remembered</p>
-            </div>
-            <small>target</small>
-          </article>
-          <article className="tweetNode nodeParent">
-            <span className="nodeDot" />
-            <div>
-              <b>@mira</b>
-              <p>replying from another box</p>
-            </div>
-            <small>parent</small>
-          </article>
-          <article className="tweetNode nodeRoot">
-            <span className="nodeDot" />
-            <div>
-              <b>@sol</b>
-              <p>the beginning of the thread</p>
-            </div>
-            <small>root</small>
-          </article>
-          <div className="edge edgeOne" aria-hidden="true" />
-          <div className="edge edgeTwo" aria-hidden="true" />
-          <div className="edgePulse pulseOne" aria-hidden="true" />
-          <div className="edgePulse pulseTwo" aria-hidden="true" />
-        </div>
-
-        <div className="terminal" aria-live="polite">
-          <div className="terminalBar">
-            <i />
-            <i />
-            <i />
-            <span>ariadne · {step.title.toLowerCase()}</span>
-          </div>
-          <div className="terminalBody">
-            <p>
-              <span className="prompt">»</span> {step.command}
-            </p>
-            {step.output.map((line) => (
-              <p className="terminalOutput" key={line}>
-                {line}
-              </p>
-            ))}
-            <span className="caret" aria-hidden="true" />
-          </div>
-        </div>
-      </div>
-    </aside>
+    <nav className={compact ? "sectionNav compact" : "sectionNav"} aria-label="On this page">
+      <p>On this page</p>
+      <ol>
+        {sections.map(([id, label], index) => (
+          <li key={id}>
+            <a href={`#${id}`}>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              {label}
+            </a>
+          </li>
+        ))}
+      </ol>
+    </nav>
   );
 }
 
 export default function Home() {
-  const [demoIndex, setDemoIndex] = useState(3);
-  const [activeSection, setActiveSection] = useState("what");
-  const demo = demoSteps[demoIndex];
-
-  useEffect(() => {
-    const sections = toc
-      .map(([id]) => document.getElementById(id))
-      .filter((section): section is HTMLElement => section !== null);
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-        if (visible?.target.id) setActiveSection(visible.target.id);
-      },
-      { rootMargin: "-18% 0px -68%", threshold: [0, 0.2, 0.6] },
-    );
-    sections.forEach((section) => observer.observe(section));
-    return () => observer.disconnect();
-  }, []);
-
   return (
-    <main>
-      <header className="topbar">
+    <>
+      <a className="skipLink" href="#documentation">
+        Skip to documentation
+      </a>
+
+      <header className="siteHeader">
         <a className="identity" href="#top" aria-label="Ariadne home">
-          <span className="threadSigil">⌇</span>
+          <span className="miniProject miniAriadne identitySquare" aria-hidden="true">⌇</span>
           <span>ariadne</span>
         </a>
-        <span className="family">⟡ hyperplex</span>
-        <span className="tagline">find the conversation</span>
-        <nav aria-label="Primary navigation">
-          <a href="#what">Docs</a>
+        <nav className="headerConstellation" aria-label="Hyperplex projects">
+          <a className="miniProject miniHyperplex siblingProject" href="https://hyperplex.org" aria-label="Hyperplex" data-project="Hyperplex"><span aria-hidden="true">⟡</span></a>
+          <a className="miniProject miniRaft siblingProject" href="https://github.com/lumpenspace/raft" aria-label="Raft" data-project="Raft"><span aria-hidden="true">≋</span></a>
+          <a className="miniProject miniOpbdh siblingProject" href="https://opbdh.hyperplex.org" aria-label="OPBDH" data-project="OPBDH"><span aria-hidden="true">◉</span></a>
+        </nav>
+        <nav className="primaryNav" aria-label="Primary navigation">
+          <a href="#quickstart">Quickstart</a>
+          <a href="#python">Python API</a>
           <a href="https://github.com/lumpenspace/ariadne">GitHub</a>
         </nav>
       </header>
 
-      <section className="hero" id="top" aria-labelledby="hero-title">
-        <div className="heroGrid" aria-hidden="true" />
-        <div className="heroArtifact" aria-hidden="true" />
-        <div className="heroContent">
-          <p className="heroKicker">archive-first conversation reconstruction</p>
-          <h1 id="hero-title">Follow the thread.</h1>
-          <p className="heroLede">
-            Ariadne turns fragmented X/Twitter archives into complete reply branches,
-            searchable local memory, and clean input for people, models, and Raft.
-          </p>
-          <div className="heroActions">
-            <a className="primaryAction" href="#install">
-              start with an archive <span>↓</span>
-            </a>
-            <a className="secondaryAction" href="#reconstruct">
-              see reconstruction
-            </a>
-          </div>
-          <div className="heroCommand" aria-label="Quick start commands">
-            <span className="windowDots">● ● ●</span>
-            <code>
-              <span>$</span> uv tool install &apos;ariadne-x[parquet]&apos;
-              <br />
-              <span>$</span> ariadne dumps interactive
-            </code>
-          </div>
-          <dl className="heroFacts">
-            <div>
-              <dt>04</dt>
-              <dd>archive kinds</dd>
-            </div>
-            <div>
-              <dt>05</dt>
-              <dd>renderers</dd>
-            </div>
-            <div>
-              <dt>00</dt>
-              <dd>network calls by default</dd>
-            </div>
-          </dl>
-        </div>
-      </section>
-
-      <div className="docsLayout">
-        <nav className="toc" aria-label="Documentation contents">
-          <p>┌─[ documentation ]</p>
-          <ol>
-            {toc.map(([id, label]) => (
-              <li key={id}>
-                <a className={activeSection === id ? "active" : ""} href={`#${id}`}>
-                  {label}
-                </a>
-              </li>
-            ))}
-          </ol>
-          <span className="tocVersion">└─ v0.5 · alpha</span>
-        </nav>
-
-        <article className="docs">
-          <section id="what" className="docSection firstSection">
-            <p className="kicker">00 · the map</p>
-            <h2>One remembered post. Three archives. One conversation again.</h2>
-            <p className="intro">
-              Social exports preserve posts, but the meaning often lives elsewhere: in a
-              parent from another account, a quoted post, or a branch split across datasets.
-              Ariadne normalizes those sources and follows their IDs back to the root.
+      <main>
+        <section className="hero" id="top" aria-labelledby="hero-title">
+          <Image className="heroImage" src="/ariadne-thread-v2.png" alt="" fill priority sizes="100vw" />
+          <div className="heroGrid" aria-hidden="true" />
+          <div className="heroContent">
+            <p className="eyebrow">Local-first conversation reconstruction</p>
+            <h1 id="hero-title">Find the conversation.</h1>
+            <p className="heroLede">
+              Ariadne combines X/Twitter archives and tweet datasets, follows the reply and
+              quote IDs they contain, and renders root-to-target branches for reading,
+              retrieval, or model input.
             </p>
-            <ol className="mission">
-              {demoSteps.map((step, index) => (
-                <li key={step.id}>
-                  <button
-                    type="button"
-                    className={index === demoIndex ? "active" : ""}
-                    onClick={() => setDemoIndex(index)}
-                    aria-pressed={index === demoIndex}
-                  >
-                    <span className="missionNumber">{step.number}</span>
-                    <span>
-                      <b>{step.title}</b>
-                      <small>{step.summary}</small>
-                      <code>{step.command}</code>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ol>
-          </section>
+            <div className="heroActions">
+              <a className="primaryAction" href="#quickstart">
+                Build your first branch <span aria-hidden="true">↓</span>
+              </a>
+              <a className="secondaryAction" href="#python">Use the Python API</a>
+            </div>
+            <div className="heroCommand" aria-label="Ariadne quickstart">
+              <span aria-hidden="true">$</span><code>uv tool install ariadne-x</code>
+              <span aria-hidden="true">$</span><code>ariadne interactive</code>
+            </div>
+            <dl className="heroFacts">
+              <div><dt>Local first</dt><dd>ordinary archive builds stay offline</dd></div>
+              <div><dt>Cross-archive</dt><dd>one branch can span several datasets</dd></div>
+              <div><dt>Five formats</dt><dd>messages, OpenAI, JSON, Markdown, Raft</dd></div>
+            </dl>
+          </div>
+        </section>
 
-          <section id="install" className="docSection">
-            <p className="kicker">01 · install</p>
-            <h2>The package is ariadne-x. The tool is ariadne.</h2>
-            <p>
-              Python 3.11 or newer is required. The <code>parquet</code> extra adds DuckDB
-              for bulk Parquet imports; personal and Community archives work in the base
-              install.
-            </p>
-            <CodeBlock>{`uv tool install 'ariadne-x[parquet]'
+        <div className="docsShell" id="documentation">
+          <aside className="leftRail"><OnThisPage /></aside>
+
+          <article className="docs">
+            <details className="mobileContents">
+              <summary>On this page</summary>
+              <OnThisPage compact />
+            </details>
+
+            <section className="docSection firstSection" id="quickstart">
+              <p className="kicker">01 · Quickstart</p>
+              <h2>Go from an archive to readable branches.</h2>
+              <p className="intro">
+                Use a one-shot build when you have a personal export and want an answer now.
+                Nothing is imported into Ariadne&apos;s persistent library.
+              </p>
+              <div className="notice importantNotice">
+                <strong>What reconstruction means</strong>
+                <p>
+                  Ariadne follows the parent IDs your sources know about. Missing posts remain
+                  visible as unavailable placeholders; use <code>--strict</code> when you would
+                  rather fail than keep a partial branch.
+                </p>
+              </div>
+              <h3>1. Install the command</h3>
+              <CodeBlock label="Terminal">{`uv tool install ariadne-x
 ariadne --help`}</CodeBlock>
-            <h3>Run from a checkout</h3>
-            <CodeBlock>{`git clone https://github.com/lumpenspace/ariadne
-cd ariadne
-uv sync --extra dev --extra parquet
-uv run ariadne --help`}</CodeBlock>
-            <div className="callout">
-              <span>⌇</span>
+              <h3>2. Build Markdown from a personal archive</h3>
+              <CodeBlock label="Terminal">{`ariadne build \\
+  --archive ~/Downloads/twitter-archive.zip \\
+  --for-user alice \\
+  --since 2024-01-01 \\
+  --format markdown \\
+  --output conversations.md`}</CodeBlock>
               <p>
-                <strong>Two interactive modes:</strong> <code>ariadne interactive</code>
-                builds conversations. <code>ariadne dumps interactive</code> explores the
-                persistent archive library.
+                Replace <code>alice</code> with the archive owner&apos;s username. The file contains
+                one retained root-to-target branch per section, including attribution, quote
+                context, warnings, and placeholders where a post could not be resolved.
               </p>
-            </div>
-          </section>
+              <h3>Prefer prompts?</h3>
+              <p>
+                Run <code>ariadne interactive</code> for a guided conversation build. The local
+                dump explorer is a different command: <code>ariadne dumps interactive</code>.
+              </p>
+            </section>
 
-          <section id="archives" className="docSection">
-            <p className="kicker">02 · archive library</p>
-            <h2>Import once. Search locally. Keep the source out of the way.</h2>
-            <p>
-              Each source becomes a normalized, indexed SQLite database under
-              <code>~/.ariadne/dumps</code>. Set <code>ARIADNE_HOME</code> to move the
-              settings directory. The source is never modified.
-            </p>
-            <CodeBlock>{`ariadne dumps import ~/DATA/tpot_dump --name tpot
-ariadne dumps import ~/Downloads/community.zip --name community
-ariadne dumps import ~/Downloads/twitter-archive.zip --name personal
-ariadne dumps list`}</CodeBlock>
-            <div className="tableWrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Source</th>
-                    <th>Shape</th>
-                    <th>What survives</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {archiveKinds.map((row) => (
-                    <tr key={row[0]}>
-                      <td>{row[0]}</td>
-                      <td>{row[1]}</td>
-                      <td>{row[2]}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="finePrint">
-              Kind detection is automatic. Use <code>--kind community-csv</code>,
-              <code>parquet</code>, <code>twitter-archive</code>, or
-              <code>tweets-file</code> when a source is ambiguous. Re-importing a name
-              replaces that normalized database only after a successful import.
-            </p>
-          </section>
+            <section className="docSection" id="workflows">
+              <p className="kicker">02 · Choose an input</p>
+              <h2>Start with the data you already have.</h2>
+              <div className="workflowGrid">
+                <article><span>One archive</span><h3>Build without importing</h3><code>--archive PATH</code><p>Use a personal export or Community Archive folder, ZIP, or data file once.</p></article>
+                <article><span>Reusable collection</span><h3>Import into the library</h3><code>ariadne dumps import PATH</code><p>Normalize and index archives you want to search or combine repeatedly.</p></article>
+                <article><span>CSV / JSON / JSONL</span><h3>Load generic records</h3><code>--tweets-file PATH</code><p>Fields survive when the source provides them; sparse input may not contain reply edges.</p></article>
+                <article><span>Known posts</span><h3>Pass IDs or X URLs</h3><code>ariadne build [ITEM ...]</code><p>Combine positional items with local sources or an explicitly enabled API fallback.</p></article>
+                <article><span>Public X account</span><h3>Try cheap network sources</h3><code>--target-user USER</code><p>Enables unofficial RSS and oEmbed by default. It is convenient, not a completeness guarantee.</p></article>
+                <article><span>Bluesky</span><h3>Use its public thread API</h3><code>ariadne bluesky HANDLE</code><p>No authentication is required; output uses the same five renderers.</p></article>
+              </div>
+              <h3>Install as a library</h3>
+              <CodeBlock label="Terminal">{`python3 -m pip install ariadne-x
 
-          <section id="explore" className="docSection">
-            <p className="kicker">03 · explore</p>
-            <h2>Search is cross-archive unless you tell it not to be.</h2>
-            <p>
-              The interactive explorer changes scope, browses users, searches text, opens
-              timelines, and shows the thread context available across every selected dump.
-            </p>
-            <CodeBlock>{`ariadne dumps interactive
-ariadne dumps users --top 25
-ariadne dumps search 'local-first' --user alice
+# Add DuckDB only for Parquet imports
+uv tool install 'ariadne-x[parquet]'`}</CodeBlock>
+              <p className="finePrint">
+                Ariadne requires Python 3.11 or newer. The distribution is named <code>ariadne-x</code>;
+                both the command and import package are named <code>ariadne</code>. Personal archives,
+                Community CSV/ZIP, and generic files work without the Parquet extra.
+              </p>
+            </section>
+
+            <section className="docSection" id="reconstruction">
+              <p className="kicker">03 · How it works</p>
+              <h2>Target to root for lookup. Root to target for output.</h2>
+              <ol className="pipeline" aria-label="Ariadne reconstruction pipeline">
+                <li><span>01</span><strong>Load</strong><small>Normalize archives, files, dumps, and cache.</small></li>
+                <li><span>02</span><strong>Select</strong><small>Choose IDs or matching user posts as targets.</small></li>
+                <li><span>03</span><strong>Follow</strong><small>Walk each known reply-parent chain toward its root.</small></li>
+                <li><span>04</span><strong>Attach</strong><small>Add quote paths when the selected sources provide them.</small></li>
+                <li><span>05</span><strong>Render</strong><small>Prune subset branches and write root-to-target output.</small></li>
+              </ol>
+              <div className="behaviorGrid">
+                <article><h3>Branches, not whole trees</h3><p>A target includes its ancestors. Sibling replies are not discovered or appended.</p></article>
+                <article><h3>Dates select targets</h3><p><code>--since</code> does not discard older ancestors needed by a selected branch.</p></article>
+                <article><h3>Partial data stays visible</h3><p>Unresolved posts produce warnings and placeholders unless <code>--strict</code> is set.</p></article>
+                <article><h3>Quotes have two jobs</h3><p>Quote context is attached separately. A root quote-tweet is spliced onto its quoted post by default.</p></article>
+              </div>
+              <div className="notice">
+                <strong>Useful controls</strong>
+                <p>The default ancestor limit is 50. Use <code>--max-depth</code>, <code>--no-quotes</code>, or <code>--no-quote-as-reply</code> to change the reconstruction policy.</p>
+              </div>
+            </section>
+
+            <section className="docSection" id="library">
+              <p className="kicker">04 · Archive library</p>
+              <h2>Import once, then search and combine locally.</h2>
+              <p>
+                A persistent import is a normalized SQLite database under <code>~/.ariadne/dumps</code>,
+                or <code>$ARIADNE_HOME/dumps</code>. Later queries no longer need the source.
+                Removing an import never removes or edits that source.
+              </p>
+              <CodeBlock label="Terminal">{`ariadne dumps import ~/Downloads/twitter-archive.zip --name personal
+ariadne dumps import ~/DATA/community.zip --name community
+ariadne dumps list
+
+ariadne dumps search 'remembered phrase' --user alice
 ariadne dumps user alice --since 2024-01-01 --limit 50
-ariadne dumps show https://x.com/alice/status/1234567890`}</CodeBlock>
-            <div className="callout blueCallout">
-              <span>⟡</span>
+ariadne dumps show https://x.com/alice/status/1234567890123456789`}</CodeBlock>
+              <div className="tableWrap">
+                <table>
+                  <caption>Supported persistent import shapes</caption>
+                  <thead><tr><th scope="col">Kind</th><th scope="col">Accepted input</th><th scope="col">Explicit flag</th></tr></thead>
+                  <tbody>
+                    {archiveKinds.map(([kind, shape, flag]) => (
+                      <tr key={kind}><th scope="row">{kind}</th><td>{shape}</td><td><code>--kind {flag}</code></td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="detailList">
+                <li>All imported dumps participate in a build automatically. Repeat <code>--dump NAME</code> to narrow the set, or use <code>--no-dumps</code> for an isolated run.</li>
+                <li>Duplicate post IDs are merged across selected dumps, preserving complementary metadata.</li>
+                <li><code>--no-fts</code> skips the full-text index; search then falls back to slower substring matching.</li>
+                <li>More than 10,000 matching local posts requires a narrower <code>--since</code> or explicit <code>--dump-limit</code>.</li>
+              </ul>
+              <a className="referenceLink" href="https://github.com/lumpenspace/ariadne/blob/main/docs/DUMPS.md">Read the complete archive library guide <span aria-hidden="true">↗</span></a>
+            </section>
+
+            <section className="docSection" id="sources">
+              <p className="kicker">05 · Network sources</p>
+              <h2>Know which sources have text and which have edges.</h2>
               <p>
-                Add repeatable <code>--dump NAME</code> to restrict a query. Without it,
-                duplicate post IDs are merged and complementary metadata from different
-                archives is preserved.
+                A reply branch can continue only when a source knows the parent post ID. Text-only
+                sources can repair content, but they cannot infer the missing edge. Ordinary local
+                builds do not make network requests.
               </p>
-            </div>
-          </section>
-
-          <section id="reconstruct" className="docSection">
-            <p className="kicker">04 · reconstruct</p>
-            <h2>Build the user&apos;s conversations, not a bag of isolated posts.</h2>
-            <p>
-              Imported dumps participate automatically. Ariadne selects the user&apos;s
-              starting posts, recursively follows reply parents, attaches quote context,
-              and prunes branches already contained in longer branches. Every step may
-              cross archive boundaries.
-            </p>
-            <CodeBlock>{`ariadne build \
-  --for-user alice \
-  --since 2024-01-01 \
-  --format markdown \
-  --output alice-conversations.md`}</CodeBlock>
-            <div className="threadRule">
-              <div>
-                <span className="ruleNode" />
-                <b>start</b>
-                <small>alice · personal</small>
+              <div className="tableWrap wideTable">
+                <table>
+                  <caption>Source capabilities and activation</caption>
+                  <thead><tr><th scope="col">Source</th><th scope="col">Finds targets</th><th scope="col">Reply IDs</th><th scope="col">Enabled by</th></tr></thead>
+                  <tbody>
+                    {sourceRows.map(([source, targets, edges, policy]) => (
+                      <tr key={source}><th scope="row">{source}</th><td>{targets}</td><td>{edges}</td><td>{policy}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              <i />
-              <div>
-                <span className="ruleNode" />
-                <b>parent</b>
-                <small>mira · community</small>
-              </div>
-              <i />
-              <div>
-                <span className="ruleNode" />
-                <b>root</b>
-                <small>sol · tpot</small>
-              </div>
-            </div>
-            <ul className="detailList">
-              <li>
-                <strong><code>--since</code></strong> limits starting posts, not the older
-                ancestors needed to complete them.
-              </li>
-              <li>
-                <strong><code>--dump NAME</code></strong> narrows the library;
-                <code>--no-dumps</code> disables it.
-              </li>
-              <li>
-                <strong>Large timelines</strong> above 10,000 posts require a narrower date
-                or an explicit <code>--dump-limit</code>.
-              </li>
-              <li>
-                <strong>Network reads</strong> stay off unless you enable oEmbed, RSS,
-                Community Archive, X API, or twitterapi.io.
-              </li>
-            </ul>
-          </section>
+              <h3>Public-account convenience mode</h3>
+              <p>
+                <code>--target-user alice</code> tries the local store and cache, then the default
+                Nitter/XCancel-style RSS endpoints and oEmbed. Those public services are unsupported,
+                fragile, commonly recent-only, and usually lack parent IDs. Disable them with
+                <code>--no-unofficial-rss --no-oembed</code>.
+              </p>
+              <CodeBlock label="Terminal">{`# Permit official X API reads after cheap sources
+ariadne build \\
+  --target-user alice \\
+  --fetch \\
+  --fetch-user-timeline \\
+  --max-user-pages 2 \\
+  --format raft \\
+  --output alice.jsonl`}</CodeBlock>
+              <p className="finePrint">
+                <code>--fetch</code> resolves selected posts and missing parents; <code>--fetch-user-timeline</code>
+                enumerates the user timeline. Both require an X bearer token and may consume billable API reads.
+                Community Archive is donor-scoped; twitterapi.io is a separate potentially paid gateway.
+              </p>
+              <a className="referenceLink" href="https://github.com/lumpenspace/ariadne/blob/main/docs/SOURCES.md">Read the full source policy <span aria-hidden="true">↗</span></a>
+            </section>
 
-          <section id="outputs" className="docSection">
-            <p className="kicker">05 · outputs & API</p>
-            <h2>Keep the graph. Read the thread. Feed the model.</h2>
-            <div className="outputGrid">
-              <article>
-                <span>json</span>
-                <p>Normalized tweets, branch paths, quotes, warnings, and provenance.</p>
-              </article>
-              <article>
-                <span>markdown</span>
-                <p>A compact reading view for humans and notebooks.</p>
-              </article>
-              <article>
-                <span>messages</span>
-                <p>OpenAI-like turns with tweet metadata and participant names.</p>
-              </article>
-              <article>
-                <span>openai</span>
-                <p>Strict role, name, and content objects for API input.</p>
-              </article>
-              <article>
-                <span>raft</span>
-                <p>One retrieval document per reconstructed branch, emitted as JSONL.</p>
-              </article>
-            </div>
-            <h3>Python, without a file round-trip</h3>
-            <CodeBlock>{`import ariadne
+            <section className="docSection" id="outputs">
+              <p className="kicker">06 · Output formats</p>
+              <h2>Choose the representation your next step needs.</h2>
+              <div className="tableWrap">
+                <table>
+                  <caption>Ariadne renderers</caption>
+                  <thead><tr><th scope="col">Format</th><th scope="col">Encoding</th><th scope="col">Best for</th></tr></thead>
+                  <tbody>
+                    {outputRows.map(([format, encoding, description]) => (
+                      <tr key={format}><th scope="row"><code>{format}</code></th><td>{encoding}</td><td>{description}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <CodeBlock label="Terminal">{`# Read it
+ariadne build --archive archive.zip --for-user alice --format markdown
 
-result = ariadne.build(
+# Feed retrieval
+ariadne build --archive archive.zip --for-user alice --format raft -o branches.jsonl
+
+# Keep the normalized graph
+ariadne build --archive archive.zip --for-user alice --format json -o graph.json`}</CodeBlock>
+              <div className="notice">
+                <strong>Role names describe position, not speaker intent</strong>
+                <p>In <code>messages</code> and <code>openai</code>, the root is <code>assistant</code> and later posts are <code>user</code>. In <code>raft</code>, later posts are <code>participant</code>.</p>
+              </div>
+              <a className="referenceLink" href="https://github.com/lumpenspace/ariadne/blob/main/docs/SCHEMA.md">Inspect the output schemas <span aria-hidden="true">↗</span></a>
+            </section>
+
+            <section className="docSection" id="python">
+              <p className="kicker">07 · Python API</p>
+              <h2>Run the same pipeline without a file round-trip.</h2>
+              <p>The public API is typed and synchronous. Pass keywords for compact calls, or use <code>BuildOptions</code> when configuration should be reusable and inspectable.</p>
+              <CodeBlock label="Python">{`from pathlib import Path
+import ariadne
+
+options = ariadne.BuildOptions(
+    archive=Path("twitter-archive.zip"),
     for_user="alice",
-    dump=["personal", "community", "tpot"],
     since="2024-01-01",
+    no_dumps=True,  # keep this run isolated from persistent imports
 )
 
-for document in result.raft_documents():
-    print(document["metadata"]["target_id"])`}</CodeBlock>
-            <p className="finePrint">
-              The lower-level API also exposes <code>LocalDumpsClient</code>,
-              <code>TweetStore</code>, renderers, cache helpers, and source loaders. See the
-              repository&apos;s <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/API.md">Python API reference</a>.
-            </p>
-          </section>
+result = ariadne.build(options)
 
-          <section id="sources" className="docSection">
-            <p className="kicker">06 · source truth</p>
-            <h2>Text is not structure, and cheap is not complete.</h2>
-            <p>
-              A reply branch can only continue when a source knows the parent post ID.
-              oEmbed and RSS can improve text, but rich archives or structured APIs are what
-              reveal the edges.
-            </p>
-            <div className="tableWrap sourceTable">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Source</th>
-                    <th>Knows</th>
-                    <th>Where</th>
-                    <th>Policy</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sourceRows.map((row) => (
-                    <tr key={row[0]}>
-                      {row.map((cell) => (
-                        <td key={cell}>{cell}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <h3>Nitter and XCancel RSS</h3>
-            <p className="finePrint">
-              <code>--target-user</code> tries <code>https://nitter.net</code> and{" "}
-              <code>https://rss.xcancel.com</code> unless you add{" "}
-              <code>--no-unofficial-rss</code>. For other runs, enable the fallback with{" "}
-              <code>--unofficial-rss</code>; customize it with repeatable{" "}
-              <code>--rss-base</code> or <code>--rss-url-template</code>. These services are
-              unsupported and fragile, usually expose only recent feed items, and usually
-              omit reply-parent metadata. They can recover text, but they cannot reliably
-              complete a branch by themselves.
-            </p>
-            <div className="callout">
-              <span>✓</span>
-              <p>
-                <strong>Local first is the default.</strong> Owner-only permissions are used
-                for the settings directory on POSIX systems, imported databases remain on
-                your machine, and removing a dump never touches its source archive.
+for conversation in result:
+    print(conversation.target_id)
+
+documents = result.raft_documents()
+result.save("out/branches.jsonl", "raft")`}</CodeBlock>
+              <div className="apiGrid">
+                <article><code>result.conversations</code><span>Reconstructed branch objects</span></article>
+                <article><code>result.tweets</code><span>Normalized tweets used by the result</span></article>
+                <article><code>result.warnings</code><span>Provider and data-quality diagnostics</span></article>
+                <article><code>result.render(format)</code><span>Any renderer as text</span></article>
+                <article><code>result.messages()</code><span>Parsed enriched or strict messages</span></article>
+                <article><code>result.json_payload()</code><span>Parsed graph payload</span></article>
+              </div>
+              <h3>Handle stable API errors</h3>
+              <CodeBlock label="Python">{`try:
+    result = ariadne.build(for_user="alice")
+except ariadne.NoTargetsError:
+    print("No posts matched the target selection")
+except ariadne.AriadneError as exc:
+    print(f"Ariadne could not build: {exc}")`}</CodeBlock>
+              <p className="finePrint">
+                Imported dumps are used automatically unless <code>no_dumps=True</code>. Multi-value options
+                accept one value or an iterable, filesystem inputs accept <code>PathLike</code>, and credentials
+                are excluded from option representations. In async applications, run <code>build</code> in a worker thread.
               </p>
-            </div>
-            <h3>Development</h3>
-            <CodeBlock>{`uv sync --extra dev --extra parquet
+              <a className="referenceLink" href="https://github.com/lumpenspace/ariadne/blob/main/docs/API.md">Read the complete Python API reference <span aria-hidden="true">↗</span></a>
+            </section>
+
+            <section className="docSection" id="troubleshooting">
+              <p className="kicker">08 · Troubleshooting</p>
+              <h2>Common problems have explicit fixes.</h2>
+              <div className="faqList">
+                <details><summary>No posts matched</summary><p>Supply a tweet ID/URL or a target selector such as <code>--for-user</code>, <code>--author-id</code>, or <code>--all-loaded</code>. Check that <code>--since</code> is not too narrow.</p></details>
+                <details><summary>A parent is unavailable</summary><p>None of the selected sources resolved that ID. Add a richer archive or explicitly enable a structured network source. Use <code>--strict</code> only if partial branches should fail.</p></details>
+                <details><summary>A local timeline exceeds 10,000 posts</summary><p>Add a narrower <code>--since</code> date or an explicit <code>--dump-limit</code>. Explicit limits keep the newest matching posts.</p></details>
+                <details><summary>A Parquet import asks for DuckDB</summary><p>Install the optional dependency with <code>uv tool install &apos;ariadne-x[parquet]&apos;</code>.</p></details>
+                <details><summary>Search is unexpectedly slow</summary><p>The import may have been created with <code>--no-fts</code>. Re-import it without that flag to build the full-text index.</p></details>
+                <details><summary>Unrelated imported posts appear in a build</summary><p>Persistent dumps join builds by default. Restrict them with repeatable <code>--dump NAME</code>, or disable them with <code>--no-dumps</code>.</p></details>
+              </div>
+              <h3>Reference and development</h3>
+              <div className="referenceGrid">
+                <a href="https://github.com/lumpenspace/ariadne/blob/main/README.md"><strong>README</strong><span>Overview and CLI examples</span></a>
+                <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/DUMPS.md"><strong>Archive library</strong><span>Import and local exploration</span></a>
+                <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/SOURCES.md"><strong>Sources</strong><span>Coverage, network, and cost</span></a>
+                <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/SCHEMA.md"><strong>Schemas</strong><span>All five output formats</span></a>
+                <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/API.md"><strong>Python API</strong><span>Typed public surface</span></a>
+                <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/RAFT.md"><strong>Raft</strong><span>Retrieval document integration</span></a>
+              </div>
+              <CodeBlock label="Contributing">{`uv sync --extra dev --extra parquet
 uv run pytest
-uv run ruff check .`}</CodeBlock>
-          </section>
-        </article>
+uv run ruff check .
+uv run mypy src`}</CodeBlock>
+            </section>
+          </article>
 
-        <ThreadLab step={demo} />
-      </div>
-
-      <footer>
-        <div>
-          <span className="threadSigil">⌇</span>
-          <strong>ariadne</strong>
-          <span> · </span>
-          <span className="family">⟡ hyperplex</span>
+          <aside className="rightRail" aria-label="Quick reference">
+            <div className="quickReference">
+              <p className="railLabel">Quick reference</p>
+              <dl>
+                <div><dt>Build</dt><dd><code>ariadne build</code></dd></div>
+                <div><dt>Explore</dt><dd><code>ariadne dumps interactive</code></dd></div>
+                <div><dt>Inspect</dt><dd><code>ariadne inspect-archive PATH</code></dd></div>
+                <div><dt>Default format</dt><dd><code>messages</code></dd></div>
+                <div><dt>Default depth</dt><dd>50 ancestors</dd></div>
+                <div><dt>Default cache</dt><dd><code>.ariadne-cache.json</code></dd></div>
+              </dl>
+              <div className="railRule" />
+              <p className="railLabel">Three rules to remember</p>
+              <ol className="railRules">
+                <li><span>01</span>Imported dumps join builds automatically.</li>
+                <li><span>02</span><code>--since</code> filters targets, not their ancestors.</li>
+                <li><span>03</span>Only sources with parent IDs can extend a branch.</li>
+              </ol>
+              <a className="railLink" href="https://github.com/lumpenspace/ariadne">View source on GitHub ↗</a>
+            </div>
+          </aside>
         </div>
-        <nav aria-label="Footer navigation">
+      </main>
+
+      <footer className="siteFooter">
+        <nav className="constellation" aria-labelledby="constellation-title">
+          <div className="constellationHeading">
+            <p id="constellation-title">Part of Hyperplex</p>
+            <span>Four tools, one small constellation.</span>
+          </div>
+          <ul className="projectTiles">
+            <li>
+              <a className="projectTile hyperplexTile" href="https://hyperplex.org">
+                <span className="projectSigil" aria-hidden="true">⟡</span>
+                <span><strong>hyperplex</strong><small>the network</small></span>
+              </a>
+            </li>
+            <li>
+              <a className="projectTile ariadneTile" href="https://ariadne.hyperplex.org" aria-current="page">
+                <span className="projectSigil" aria-hidden="true">⌇</span>
+                <span><strong>ariadne</strong><small>current site</small></span>
+              </a>
+            </li>
+            <li>
+              <a className="projectTile raftTile" href="https://github.com/lumpenspace/raft">
+                <span className="projectSigil" aria-hidden="true">≋</span>
+                <span><strong>raft</strong><small>fine-tuning</small></span>
+              </a>
+            </li>
+            <li>
+              <a className="projectTile opbdhTile" href="https://opbdh.hyperplex.org">
+                <span className="projectSigil" aria-hidden="true">◉</span>
+                <span><strong>opbdh</strong><small>GPU runs</small></span>
+              </a>
+            </li>
+          </ul>
+        </nav>
+        <div className="footerIdentity"><span className="threadSigil" aria-hidden="true">⌇</span><strong>ariadne</strong><span className="family"> · ⟡ hyperplex</span></div>
+        <nav className="footerLinks" aria-label="Footer navigation">
           <a href="https://github.com/lumpenspace/ariadne">GitHub</a>
           <a href="https://github.com/lumpenspace/ariadne/blob/main/README.md">README</a>
           <a href="https://github.com/lumpenspace/ariadne/blob/main/LICENSE">License</a>
         </nav>
-        <p>The thread was there all along.</p>
+        <p>Reconstruction is only as complete as the sources you give it.</p>
       </footer>
-    </main>
+    </>
   );
 }

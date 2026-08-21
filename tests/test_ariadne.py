@@ -12,8 +12,8 @@ from ariadne.archive import load_archive
 from ariadne.cli import CheapFirstFetcher, collect_conversations, is_reply_start, needs_official_metadata
 from ariadne.fetch import FetchResult, tweet_from_oembed_payload
 from ariadne.ids import extract_tweet_ids
-from ariadne.models import Tweet, TweetRef
-from ariadne.reconstruct import ConversationBuilder
+from ariadne.models import Conversation, Tweet, TweetRef
+from ariadne.reconstruct import ConversationBuilder, prune_subset_conversations
 from ariadne.render import render
 from ariadne.sources import load_tweets_file, select_user_tweet_ids
 from ariadne.store import TweetStore
@@ -113,6 +113,17 @@ class AriadneTests(unittest.TestCase):
         self.assertEqual([conversation.target_id for conversation in conversations], ["3", "4"])
         self.assertEqual(conversations[0].path, ["1", "2", "3"])
         self.assertEqual(conversations[1].path, ["1", "4"])
+
+    def test_prunes_many_nested_branches_without_quadratic_pairing(self) -> None:
+        tweet_ids = [str(index) for index in range(1_000)]
+        conversations = [
+            Conversation(target_id=tweet_ids[index], path=tweet_ids[: index + 1])
+            for index in range(1_000)
+        ]
+
+        pruned = prune_subset_conversations(conversations)
+
+        self.assertEqual([conversation.target_id for conversation in pruned], ["999"])
 
     def test_quote_context_reconstructs_quoted_branch(self) -> None:
         store = TweetStore()

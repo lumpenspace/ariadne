@@ -242,7 +242,8 @@ def _iter_tapio_tweets(payload: Any):
 
 def _tweet_from_tapio(item: dict[str, Any]) -> Tweet:
     tweet_id = str(item["id"])
-    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    raw_author = item.get("author")
+    author: dict[str, Any] = raw_author if isinstance(raw_author, dict) else {}
     username = _optional_str(author.get("userName") or item.get("userName"))
     refs: list[TweetRef] = []
     reply_to = _optional_str(item.get("inReplyToId"))

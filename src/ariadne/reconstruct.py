@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .errors import ReconstructionError
+from .fetch import FetchResult
 from .ids import unique_preserve_order
 from .models import Conversation, QuoteContext, Tweet, missing_tweet
 from .store import TweetStore
 
 
 class TweetFetcher(Protocol):
-    def get_posts(self, ids: list[str]): ...
+    def get_posts(self, ids: list[str]) -> FetchResult: ...
 
 
 class ConversationBuilder:
@@ -73,7 +75,7 @@ class ConversationBuilder:
             if tweet is None:
                 message = f"Tweet {current_id} is missing and could not be fetched"
                 if self.strict:
-                    raise RuntimeError(message)
+                    raise ReconstructionError(message)
                 self.warnings.append(message)
                 tweet = missing_tweet(current_id, source="missing")
                 self.store.add(tweet)
@@ -167,20 +169,30 @@ class ConversationBuilder:
 
 
 def prune_subset_conversations(conversations: list[Conversation]) -> list[Conversation]:
-    keep: list[Conversation] = []
-    for index, conversation in enumerate(conversations):
-        ids = conversation.all_ids
-        drop = False
-        for other_index, other in enumerate(conversations):
-            if index == other_index:
+    """Drop branches contained by another branch without an O(n²) scan.
+
+    Largest branches are considered first. For each smaller branch, any
+    possible superset must contain every one of its tweet ids, so the rarest
+    id's posting list gives a small candidate set to check. Equal branches are
+    ordered by their original position, preserving the historical first-one
+    wins behavior.
+    """
+    id_sets = [conversation.all_ids for conversation in conversations]
+    ordered = sorted(range(len(conversations)), key=lambda index: (-len(id_sets[index]), index))
+    postings: dict[str, list[int]] = {}
+    kept: set[int] = set()
+
+    for index in ordered:
+        ids = id_sets[index]
+        if ids:
+            pivot = min(ids, key=lambda tweet_id: len(postings.get(tweet_id, ())))
+            candidates = postings.get(pivot, ())
+            if any(ids <= id_sets[other] for other in candidates):
                 continue
-            other_ids = other.all_ids
-            if ids < other_ids:
-                drop = True
-                break
-            if ids == other_ids and other_index < index:
-                drop = True
-                break
-        if not drop:
-            keep.append(conversation)
-    return keep
+        elif kept:
+            continue
+        kept.add(index)
+        for tweet_id in ids:
+            postings.setdefault(tweet_id, []).append(index)
+
+    return [conversation for index, conversation in enumerate(conversations) if index in kept]

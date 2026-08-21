@@ -10,9 +10,26 @@ Typical library use:
 See :func:`ariadne.build` and :class:`ariadne.BuildOptions`.
 """
 
-from .api import BuildOptions, BuildResult, build, build_conversations
+from .api import (
+    BuildKwargs,
+    BuildOptions,
+    BuildResult,
+    OutputFormat,
+    PathInput,
+    build,
+    build_conversations,
+)
 from .archive import load_archive
 from .bluesky import build_bluesky
+from .dumps import DumpInfo, LocalDumpsClient, ariadne_home, import_dump, list_dumps, remove_dump
+from .errors import (
+    AriadneError,
+    ConfigurationError,
+    NoTargetsError,
+    ReconstructionError,
+    SourceError,
+)
+from .fetch import XApiError
 from .providers import CommunityArchiveClient, TwitterApiIoClient
 from .models import Conversation, QuoteContext, Tweet, TweetRef
 from .render import (
@@ -32,8 +49,18 @@ __all__ = [
     "build_bluesky",
     "BuildOptions",
     "BuildResult",
+    "BuildKwargs",
+    "OutputFormat",
+    "PathInput",
     "CommunityArchiveClient",
     "TwitterApiIoClient",
+    # Errors
+    "AriadneError",
+    "ConfigurationError",
+    "NoTargetsError",
+    "ReconstructionError",
+    "SourceError",
+    "XApiError",
     # Models
     "Conversation",
     "QuoteContext",
@@ -45,6 +72,13 @@ __all__ = [
     "load_tweets_file",
     "load_cache",
     "save_cache",
+    # Local dumps
+    "DumpInfo",
+    "LocalDumpsClient",
+    "ariadne_home",
+    "import_dump",
+    "list_dumps",
+    "remove_dump",
     # Rendering
     "render",
     "raft_documents",
@@ -52,4 +86,4 @@ __all__ = [
     "json_payload",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

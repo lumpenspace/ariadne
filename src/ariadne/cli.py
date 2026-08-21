@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import sqlite3
 import sys
 from collections import Counter
 from dataclasses import replace
@@ -31,14 +32,15 @@ from .api import (
     target_username,
 )
 from .archive import load_archive
+from .dumps import LocalDumpsClient, import_dump, list_dumps, remove_dump
 from .fetch import XApiError
+from .ids import tweet_id_from_url, unique_preserve_order
 from .models import Tweet
 from .render import render
 from .store import save_cache
-from .ids import unique_preserve_order
 
 
-COMMANDS = {"build", "inspect-archive", "interactive", "bluesky"}
+COMMANDS = {"build", "inspect-archive", "interactive", "bluesky", "dumps"}
 
 # The pipeline moved to `api`; this module is now just an argparse front-end.
 # Everything below stays importable from `ariadne.cli` because it was public
@@ -90,8 +92,17 @@ def main(argv: list[str] | None = None) -> int:
             return interactive(args)
         if args.command == "bluesky":
             return bluesky_command(args)
+        if args.command == "dumps":
+            return dumps_command(args)
         return build(args)
-    except (FileNotFoundError, RuntimeError, XApiError, ValueError, argparse.ArgumentTypeError) as exc:
+    except (
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        XApiError,
+        ValueError,
+        argparse.ArgumentTypeError,
+    ) as exc:
         print(f"ariadne: {exc}", file=sys.stderr)
         return 2
 
@@ -128,7 +139,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format. Default: messages.",
     )
     bluesky_cmd.add_argument("-o", "--output", help="Write output to this file instead of stdout.")
+
+    dumps_cmd = subparsers.add_parser("dumps", help="Import and explore local bulk tweet dumps.")
+    add_dumps_arguments(dumps_cmd)
     return parser
+
+
+def add_dumps_arguments(dumps_cmd: argparse.ArgumentParser) -> None:
+    actions = dumps_cmd.add_subparsers(dest="dumps_action", required=True)
+
+    import_cmd = actions.add_parser(
+        "import",
+        help="Import a dump directory/file into the settings directory (~/.ariadne/dumps).",
+    )
+    import_cmd.add_argument("path", help="Source directory or file holding the dump.")
+    import_cmd.add_argument("--name", help="Name for the imported dump. Default: derived from the path.")
+    import_cmd.add_argument(
+        "--kind",
+        choices=("community-csv", "parquet", "twitter-archive", "tweets-file"),
+        help="Dump kind. Default: auto-detected.",
+    )
+    import_cmd.add_argument("--no-fts", action="store_true", help="Skip building the full-text search index.")
+
+    actions.add_parser("list", help="List imported dumps.")
+
+    interactive_cmd = actions.add_parser(
+        "interactive",
+        help="Explore imported dumps with a menu-driven interface.",
+    )
+    interactive_cmd.add_argument(
+        "--dump",
+        action="append",
+        default=[],
+        help="Start with this dump selected. Can be repeated. Default: all.",
+    )
+    interactive_cmd.add_argument(
+        "--reply-limit",
+        type=positive_int,
+        default=20,
+        help="Default maximum direct replies shown for a tweet. Default: 20.",
+    )
+
+    users_cmd = actions.add_parser("users", help="List users present in the imported dumps.")
+    users_cmd.add_argument("--dump", action="append", default=[], help="Restrict to this dump. Can be repeated.")
+    users_cmd.add_argument("--top", type=positive_int, default=40, help="Rows to show. Default: 40.")
+    users_cmd.add_argument("--find", help="Only users whose handle or name contains this text.")
+
+    search_cmd = actions.add_parser("search", help="Full-text search across imported dumps.")
+    search_cmd.add_argument("query", help="FTS5 query (falls back to substring where FTS is unavailable).")
+    search_cmd.add_argument("--dump", action="append", default=[], help="Restrict to this dump. Can be repeated.")
+    search_cmd.add_argument("--user", help="Only tweets by this username.")
+    search_cmd.add_argument("--since", help="Only tweets on or after this date, e.g. 2020-01-01.")
+    search_cmd.add_argument("--limit", type=positive_int, default=20, help="Max results. Default: 20.")
+
+    user_cmd = actions.add_parser("user", help="Show a user's tweets from the imported dumps.")
+    user_cmd.add_argument("username", help="Handle, with or without the leading @.")
+    user_cmd.add_argument("--dump", action="append", default=[], help="Restrict to this dump. Can be repeated.")
+    user_cmd.add_argument("--since", help="Only tweets on or after this date.")
+    user_cmd.add_argument("--limit", type=positive_int, default=20, help="Max tweets to show. Default: 20.")
+    user_cmd.add_argument("--retweets", action="store_true", help="Include retweets.")
+
+    show_cmd = actions.add_parser("show", help="Show one tweet with its thread context.")
+    show_cmd.add_argument("tweet_id", help="Tweet ID or URL.")
+    show_cmd.add_argument("--dump", action="append", default=[], help="Restrict to this dump. Can be repeated.")
+    show_cmd.add_argument(
+        "--reply-limit",
+        type=positive_int,
+        default=20,
+        help="Maximum direct replies to show. Default: 20.",
+    )
+
+    remove_cmd = actions.add_parser("remove", help="Delete an imported dump database.")
+    remove_cmd.add_argument("name", help="Dump name as shown by `ariadne dumps list`.")
 
 
 def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
@@ -275,6 +357,25 @@ def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
     build_cmd.add_argument(
         "--twitterapi-key",
         help="twitterapi.io API key (or set TWITTERAPI_IO_KEY) to use it as a source.",
+    )
+    build_cmd.add_argument(
+        "--dump",
+        action="append",
+        default=[],
+        help="Use only this imported local dump (see `ariadne dumps`). Can be repeated. Default: all.",
+    )
+    build_cmd.add_argument(
+        "--no-dumps",
+        action="store_true",
+        help="Do not read imported local dumps.",
+    )
+    build_cmd.add_argument(
+        "--dump-limit",
+        type=positive_int,
+        help=(
+            "Maximum posts to select for one user/author from local dumps. "
+            "Timelines over 10,000 require this or a narrower --since."
+        ),
     )
 
 
@@ -534,6 +635,266 @@ def inspect_archive(args: argparse.Namespace) -> int:
         for warning in result.warnings:
             print(f"- {warning}", file=sys.stderr)
     return 0
+
+
+def dumps_command(args: argparse.Namespace) -> int:
+    action = args.dumps_action
+    if action == "import":
+        return dumps_import(args)
+    if action == "list":
+        return dumps_list(args)
+    if action == "remove":
+        path = remove_dump(args.name)
+        hx.ok(f"removed {_lit(str(path))}")
+        return 0
+
+    client = LocalDumpsClient(names=args.dump or None)
+    if not client.available():
+        raise RuntimeError("No imported dumps yet; run `ariadne dumps import <path>` first")
+    if action == "users":
+        return dumps_users(args, client)
+    if action == "search":
+        return dumps_search(args, client)
+    if action == "user":
+        return dumps_user(args, client)
+    if action == "show":
+        return dumps_show(args, client)
+    if action == "interactive":
+        return dumps_interactive(args, client)
+    raise RuntimeError(f"Unknown dumps action: {action}")
+
+
+def dumps_import(args: argparse.Namespace) -> int:
+    info = import_dump(args.path, name=args.name, kind=args.kind, fts=not args.no_fts, progress=hx.say)
+    span = f"{(info.first_tweet or '')[:10]} → {(info.last_tweet or '')[:10]}" if info.first_tweet else "empty"
+    hx.ok(
+        f"imported {_lit(info.name)} ({info.kind}): {info.tweets:,} tweets, "
+        f"{info.accounts:,} accounts, {_lit(span)}"
+    )
+    hx.say(f"stored at {_lit(str(info.path))}")
+    for note in info.notes:
+        hx.warn(_lit(note))
+    return 0
+
+
+def dumps_list(args: argparse.Namespace) -> int:
+    infos = list_dumps()
+    if not infos:
+        hx.warn("no imported dumps; run `ariadne dumps import <path>`")
+        return 0
+    name_width = max(len(info.name) for info in infos)
+    kind_width = max(len(info.kind) for info in infos)
+    for info in infos:
+        span = f"{(info.first_tweet or '')[:10]} → {(info.last_tweet or '')[:10]}" if info.first_tweet else "empty"
+        fts = "fts" if info.fts else "   "
+        print(
+            f"{info.name:<{name_width}}  {info.kind:<{kind_width}}  "
+            f"{info.tweets:>10,} tweets  {info.accounts:>7,} accounts  {span}  {fts}  {info.source}"
+        )
+    return 0
+
+
+def dumps_users(args: argparse.Namespace, client: LocalDumpsClient) -> int:
+    users = client.users(match=args.find)
+    for user in users[: args.top]:
+        name = (user["name"] or "")[:30]
+        span = f"{(user['first'] or '')[:10]} → {(user['last'] or '')[:10]}"
+        print(f"{user['username']:<22} {name:<32} {user['tweets']:>8,} tweets  {span}")
+    remaining = len(users) - args.top
+    if remaining > 0:
+        hx.say(f"… and {remaining:,} more user(s); raise --top or filter with --find")
+    unresolved = client.unresolved_count()
+    if unresolved:
+        hx.say(f"{unresolved:,} tweets across dumps have unresolved authors (no username)")
+    return 0
+
+
+def dumps_search(args: argparse.Namespace, client: LocalDumpsClient) -> int:
+    tweets = client.search(args.query, username=args.user, since=args.since, limit=args.limit)
+    if not tweets:
+        hx.warn("no matches")
+        return 0
+    for tweet in tweets:
+        print(_dump_tweet_line(tweet, max_text=200))
+    return 0
+
+
+def dumps_user(args: argparse.Namespace, client: LocalDumpsClient) -> int:
+    result = client.get_user_posts(
+        args.username, since=args.since, limit=args.limit, include_retweets=args.retweets
+    )
+    if not result.tweets:
+        hx.warn(f"no tweets for @{args.username.strip('@')} in the selected dumps")
+        return 0
+    for tweet in result.tweets:
+        print(_dump_tweet_line(tweet))
+    return 0
+
+
+def dumps_show(args: argparse.Namespace, client: LocalDumpsClient) -> int:
+    reply_limit = positive_int(str(getattr(args, "reply_limit", 20)))
+    raw = args.tweet_id.strip()
+    tweet_id = raw if raw.isdigit() else tweet_id_from_url(raw)
+    if not tweet_id:
+        raise RuntimeError(f"Not a tweet ID or URL: {raw}")
+    found = {tweet.id: tweet for tweet in client.get_posts([tweet_id]).tweets}
+    target = found.get(tweet_id)
+    if target is None:
+        raise RuntimeError(f"Tweet {tweet_id} is not in the selected dumps")
+
+    ancestors: list[Tweet] = []
+    current = target
+    seen_ids = {target.id}
+    for _ in range(50):
+        parent_id = current.reply_parent_id()
+        if not parent_id:
+            break
+        if parent_id in seen_ids:
+            hx.warn(f"ancestor cycle detected at tweet {parent_id}; stopping context traversal")
+            break
+        seen_ids.add(parent_id)
+        parents = client.get_posts([parent_id]).tweets
+        if not parents:
+            ancestors.append(Tweet(id=parent_id, text=f"[not in dumps: {parent_id}]", available=False))
+            break
+        current = parents[0]
+        ancestors.append(current)
+    for ancestor in reversed(ancestors):
+        print(_dump_tweet_line(ancestor))
+    print(_dump_tweet_line(target, mark="▶"))
+    if target.url:
+        hx.say(target.url)
+    for quote_id in target.quote_ids():
+        quoted = client.get_posts([quote_id]).tweets
+        quote = quoted[0] if quoted else Tweet(id=quote_id, text=f"[not in dumps: {quote_id}]", available=False)
+        print(_dump_tweet_line(quote, mark="  ↳ quotes"))
+    replies = client.children(tweet_id, limit=reply_limit + 1)
+    if replies:
+        truncated = len(replies) > reply_limit
+        visible_replies = replies[:reply_limit]
+        if truncated:
+            print(f"replies in dumps (showing first {len(visible_replies)}):")
+        else:
+            print(f"replies in dumps ({len(visible_replies)}):")
+        for reply in visible_replies:
+            print(_dump_tweet_line(reply, mark="  ·"))
+        if truncated:
+            hx.say(f"… more direct replies omitted; raise --reply-limit above {reply_limit} to show more")
+    return 0
+
+
+def dumps_interactive(args: argparse.Namespace, client: LocalDumpsClient) -> int:
+    """Menu-driven explorer for the persistent local dump library."""
+    hx.banner("explore imported tweet dumps")
+    current = client
+    actions = (
+        "search tweets",
+        "browse users",
+        "show a user's tweets",
+        "show a tweet/thread",
+        "change dump scope",
+        "list imported dumps",
+        "quit",
+    )
+    try:
+        while True:
+            hx.step(f"scope: {_interactive_scope(current)}")
+            action = actions[hx.choose("What would you like to explore?", list(actions), default=0)]
+            if action == "quit":
+                return 0
+            try:
+                if action == "change dump scope":
+                    current = _choose_dump_scope(current)
+                    continue
+                if action == "list imported dumps":
+                    dumps_list(args)
+                    continue
+                if action == "search tweets":
+                    query = prompt("Search query", required=True)
+                    user = prompt("Restrict to user handle")
+                    since = prompt("On or after date [YYYY-MM-DD]")
+                    limit = positive_int(prompt("Maximum results", default="20"))
+                    dumps_search(
+                        argparse.Namespace(query=query, user=user or None, since=since or None, limit=limit),
+                        current,
+                    )
+                    continue
+                if action == "browse users":
+                    match = prompt("Filter handle or display name")
+                    top = positive_int(prompt("Maximum users", default="40"))
+                    dumps_users(argparse.Namespace(find=match or None, top=top), current)
+                    continue
+                if action == "show a user's tweets":
+                    username = prompt("User handle", required=True)
+                    since = prompt("On or after date [YYYY-MM-DD]")
+                    limit = positive_int(prompt("Maximum tweets", default="20"))
+                    retweets = prompt_yes_no("Include retweets?", default=False)
+                    dumps_user(
+                        argparse.Namespace(
+                            username=username,
+                            since=since or None,
+                            limit=limit,
+                            retweets=retweets,
+                        ),
+                        current,
+                    )
+                    continue
+                tweet_id = prompt("Tweet ID or URL", required=True)
+                reply_limit = positive_int(
+                    prompt("Maximum direct replies", default=str(args.reply_limit))
+                )
+                dumps_show(
+                    argparse.Namespace(tweet_id=tweet_id, reply_limit=reply_limit),
+                    current,
+                )
+            except (
+                OSError,
+                sqlite3.Error,
+                RuntimeError,
+                ValueError,
+                argparse.ArgumentError,
+                argparse.ArgumentTypeError,
+            ) as exc:
+                hx.warn(_lit(str(exc)))
+    except EOFError:
+        hx.say("input closed; leaving dump explorer")
+        return 0
+    except KeyboardInterrupt:
+        hx.say("interrupted; leaving dump explorer")
+        return 130
+    finally:
+        current.close()
+
+
+def _interactive_scope(client: LocalDumpsClient) -> str:
+    names = client.dump_names()
+    if len(names) == 1:
+        return names[0]
+    all_names = [info.name for info in list_dumps()]
+    label = "all" if set(names) == set(all_names) else "selected"
+    return f"{label} ({', '.join(names)})"
+
+
+def _choose_dump_scope(current: LocalDumpsClient) -> LocalDumpsClient:
+    names = [info.name for info in list_dumps()]
+    options = [f"all dumps ({', '.join(names)})", *names, "cancel"]
+    choice = hx.choose("Choose dump scope", options, default=0)
+    if choice == len(options) - 1:
+        return current
+    selected = None if choice == 0 else [names[choice - 1]]
+    replacement = LocalDumpsClient(names=selected)
+    current.close()
+    return replacement
+
+
+def _dump_tweet_line(tweet: Tweet, *, mark: str = "·", max_text: int | None = None) -> str:
+    date = (tweet.created_at or "")[:10] or "????-??-??"
+    handle = f"@{tweet.username}" if tweet.username else f"author:{tweet.author_id or '?'}"
+    text = " ".join((tweet.text or "").split()) or "[no text]"
+    if max_text is not None and len(text) > max_text:
+        text = text[: max_text - 1] + "…"
+    dump = tweet.source.removeprefix("dump:") if tweet.source else "?"
+    return f"{mark} [{date}] {handle} ({dump}) {tweet.id}\n  {text}"
 
 
 def _lit(text: str) -> str:

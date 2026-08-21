@@ -16,13 +16,17 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .errors import NoTargetsError, SourceError
 from .models import Conversation, Tweet
 from .store import TweetStore
 from .timeutil import is_on_or_after, parse_since
 
 PUBLIC_BASE = "https://public.api.bsky.app/xrpc"
+
+if TYPE_CHECKING:
+    from .api import BuildResult
 
 
 def build_bluesky(
@@ -34,7 +38,7 @@ def build_bluesky(
     base_url: str = PUBLIC_BASE,
     timeout: float = 20.0,
     allow_empty: bool = False,
-):
+) -> "BuildResult":
     """Reconstruct an actor's Bluesky reply threads as a BuildResult.
 
     Args:
@@ -57,7 +61,7 @@ def build_bluesky(
         message = f"Bluesky request for @{actor.lstrip('@')} failed: {exc}"
         if allow_empty:
             return BuildResult(store, [], [message], [], should_save_cache=False)
-        raise RuntimeError(message) from exc
+        raise SourceError(message) from exc
 
     conversations: list[Conversation] = []
     target_ids: list[str] = []
@@ -92,7 +96,7 @@ def build_bluesky(
 
     conversations = prune_subset_conversations(conversations)
     if not conversations and not allow_empty:
-        raise RuntimeError(f"No Bluesky posts reconstructed for @{actor.lstrip('@')}")
+        raise NoTargetsError(f"No Bluesky posts reconstructed for @{actor.lstrip('@')}")
     return BuildResult(
         store=store,
         conversations=conversations,

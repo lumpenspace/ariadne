@@ -10,6 +10,7 @@ from html import unescape
 from html.parser import HTMLParser
 from typing import Any
 
+from .errors import SourceError
 from .ids import unique_preserve_order
 from .models import Tweet, TweetRef
 from .timeutil import api_time
@@ -42,7 +43,7 @@ class FetchResult:
     errors: dict[str, str] = field(default_factory=dict)
 
 
-class XApiError(RuntimeError):
+class XApiError(SourceError):
     pass
 
 

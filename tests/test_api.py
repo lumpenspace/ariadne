@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import unittest
+from importlib.resources import files
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -39,6 +40,33 @@ class BuildOptionsTests(unittest.TestCase):
         options = BuildOptions(archive=None, input_file=None)
         self.assertEqual(options.archive, [])
         self.assertEqual(options.input_file, [])
+
+    def test_path_objects_and_general_iterables_are_normalized(self) -> None:
+        options = BuildOptions(
+            archive=Path("archive.zip"),
+            input_file=(Path("ids.txt"),),
+            tweets_file=(path for path in (Path("one.jsonl"), Path("two.jsonl"))),
+            cache=Path("cache.json"),
+            output=Path("result.json"),
+        )
+        self.assertEqual(options.archive, ["archive.zip"])
+        self.assertEqual(options.input_file, ["ids.txt"])
+        self.assertEqual(options.tweets_file, ["one.jsonl", "two.jsonl"])
+        self.assertEqual(options.cache, "cache.json")
+        self.assertEqual(options.output, "result.json")
+
+    def test_invalid_collection_members_are_rejected_at_construction(self) -> None:
+        with self.assertRaisesRegex(TypeError, "archive must contain only path-like values"):
+            BuildOptions(archive=["okay.zip", 42])
+
+    def test_credentials_are_not_exposed_by_repr(self) -> None:
+        options = BuildOptions(
+            bearer_token="x-secret-token",
+            twitterapi_key="twitterapi-secret-key",
+        )
+        rendered = repr(options)
+        self.assertNotIn("x-secret-token", rendered)
+        self.assertNotIn("twitterapi-secret-key", rendered)
 
     def test_coerce_accepts_namespace_mapping_and_attribute_objects(self) -> None:
         expected = ["x.zip"]
@@ -118,6 +146,16 @@ class BuildResultTests(unittest.TestCase):
         self.assertFalse(result.should_save_cache)
         self.assertIsNone(result.save_cache())
 
+    def test_build_accepts_a_positional_options_object(self) -> None:
+        options = BuildOptions(**offline(archive=FIXTURE_ARCHIVE, all_loaded=True))
+        result = ariadne.build(options)
+        self.assertIs(result.options, options)
+        self.assertEqual(result.conversations[0].path, ["1001", "1002"])
+
+    def test_build_rejects_mixed_object_and_keyword_forms(self) -> None:
+        with self.assertRaisesRegex(ariadne.ConfigurationError, "either one BuildOptions"):
+            ariadne.build(BuildOptions(), allow_empty=True)
+
 
 class PipelineTests(unittest.TestCase):
     def test_allow_empty_returns_an_empty_result_instead_of_raising(self) -> None:
@@ -128,12 +166,36 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(any("No tweet IDs matched" in w for w in result.warnings))
 
     def test_no_matching_targets_raises_without_allow_empty(self) -> None:
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ariadne.NoTargetsError) as raised:
             ariadne.build(**offline(archive=str(FIXTURE_ARCHIVE), for_user="nobody"))
+        self.assertIsInstance(raised.exception, RuntimeError)
 
     def test_fetch_without_a_token_is_rejected(self) -> None:
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ariadne.ConfigurationError) as raised:
             ariadne.build(**offline(archive=str(FIXTURE_ARCHIVE), all_loaded=True, fetch=True, bearer_token=None))
+        self.assertIsInstance(raised.exception, ValueError)
+        self.assertIsInstance(raised.exception, RuntimeError)
+
+    def test_strict_reconstruction_uses_the_public_exception(self) -> None:
+        with self.assertRaises(ariadne.ReconstructionError):
+            ariadne.build(**offline(items=["999"], strict=True))
+
+    def test_provider_errors_share_the_public_source_base(self) -> None:
+        self.assertIsInstance(ariadne.XApiError("boom"), ariadne.SourceError)
+
+    def test_invalid_api_only_options_are_rejected_before_loading(self) -> None:
+        invalid = (
+            {"max_depth": 0},
+            {"max_user_pages": True},
+            {"format": "xml"},
+            {"oembed": True, "no_oembed": True},
+            {"dump": "one", "no_dumps": True},
+            {"for_user": "alice", "target_user": "bob"},
+        )
+        for overrides in invalid:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(ariadne.ConfigurationError):
+                    ariadne.build(**offline(allow_empty=True, **overrides))
 
     def test_generic_dump_selects_by_user_and_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,8 +233,29 @@ class PipelineTests(unittest.TestCase):
 
 class PackageSurfaceTests(unittest.TestCase):
     def test_public_names_are_exported(self) -> None:
-        for name in ("build", "build_conversations", "BuildOptions", "BuildResult", "Tweet", "TweetStore", "render"):
+        for name in (
+            "build",
+            "build_conversations",
+            "BuildOptions",
+            "BuildResult",
+            "BuildKwargs",
+            "OutputFormat",
+            "PathInput",
+            "AriadneError",
+            "ConfigurationError",
+            "NoTargetsError",
+            "ReconstructionError",
+            "SourceError",
+            "XApiError",
+            "Tweet",
+            "TweetStore",
+            "render",
+        ):
             self.assertTrue(hasattr(ariadne, name), name)
+            self.assertIn(name, ariadne.__all__)
+
+    def test_distribution_declares_its_typing_metadata(self) -> None:
+        self.assertTrue(files("ariadne").joinpath("py.typed").is_file())
 
     def test_cli_still_exposes_its_historical_names(self) -> None:
         from ariadne import cli

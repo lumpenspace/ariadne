@@ -208,7 +208,8 @@ def _quote_ids_from_archive(data: dict[str, Any]) -> list[str]:
                 quote_ids.append(quote_id)
 
     if data.get("is_quote_status") is True:
-        entities = data.get("entities") if isinstance(data.get("entities"), dict) else {}
+        raw_entities = data.get("entities")
+        entities: dict[str, Any] = raw_entities if isinstance(raw_entities, dict) else {}
         for url_data in entities.get("urls", []):
             if not isinstance(url_data, dict):
                 continue
