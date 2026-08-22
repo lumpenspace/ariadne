@@ -6,6 +6,7 @@ const sections = [
   ["reconstruction", "How it works"],
   ["library", "Archive library"],
   ["sources", "Network sources"],
+  ["cache", "Resume and retry"],
   ["outputs", "Output formats"],
   ["python", "Python API"],
   ["troubleshooting", "Troubleshooting"],
@@ -31,7 +32,7 @@ const outputRows = [
   ["messages", "JSON", "Enriched chat-like messages with tweet metadata. This is the CLI default."],
   ["openai", "JSON", "The same conversation envelope, with each nested message reduced to role, name, and content."],
   ["json", "JSON", "Normalized tweets, root-to-target branches, quote paths, warnings, and provenance."],
-  ["markdown", "Text", "A readable view with attribution, unavailable placeholders, quotes, and warnings."],
+  ["markdown", "Text", "A readable view with attribution, [deleted] placeholders, quotes, and warnings. Consecutive posts by one author merge into a single message."],
   ["raft", "JSONL", "One retrieval document per retained branch, ready for chunking or embedding."],
 ] as const;
 
@@ -137,9 +138,10 @@ export default function Home() {
               <div className="notice importantNotice">
                 <strong>What reconstruction means</strong>
                 <p>
-                  Ariadne follows the parent IDs your sources know about. Missing posts remain
-                  visible as unavailable placeholders; use <code>--strict</code> when you would
-                  rather fail than keep a partial branch.
+                  Ariadne follows the parent IDs your sources know about. A post it cannot
+                  resolve stays visible as <code>[deleted]</code> rather than vanishing, so a gap
+                  in a branch is something you can see and count; use <code>--strict</code> when
+                  you would rather fail than keep a partial branch.
                 </p>
               </div>
               <h3>1. Install the command</h3>
@@ -155,7 +157,8 @@ ariadne --help`}</CodeBlock>
               <p>
                 Replace <code>alice</code> with the archive owner&apos;s username. The file contains
                 one retained root-to-target branch per section, including attribution, quote
-                context, warnings, and placeholders where a post could not be resolved.
+                context, warnings, and a <code>[deleted]</code> placeholder wherever a post could
+                not be resolved.
               </p>
               <h3>Prefer prompts?</h3>
               <p>
@@ -200,7 +203,7 @@ uv tool install 'ariadne-x[parquet]'`}</CodeBlock>
               <div className="behaviorGrid">
                 <article><h3>Branches, not whole trees</h3><p>A target includes its ancestors. Sibling replies are not discovered or appended.</p></article>
                 <article><h3>Dates select targets</h3><p><code>--since</code> does not discard older ancestors needed by a selected branch.</p></article>
-                <article><h3>Partial data stays visible</h3><p>Unresolved posts produce warnings and placeholders unless <code>--strict</code> is set.</p></article>
+                <article><h3>Partial data stays visible</h3><p>Unresolved posts produce warnings and a <code>[deleted]</code> placeholder unless <code>--strict</code> is set.</p></article>
                 <article><h3>Quotes have two jobs</h3><p>Quote context is attached separately. A root quote-tweet is spliced onto its quoted post by default.</p></article>
               </div>
               <div className="notice">
@@ -286,8 +289,42 @@ ariadne build \\
               <a className="referenceLink" href="https://github.com/lumpenspace/ariadne/blob/main/docs/SOURCES.md">Read the full source policy <span aria-hidden="true">↗</span></a>
             </section>
 
+            <section className="docSection" id="cache">
+              <p className="kicker">06 · Resume and retry</p>
+              <h2>The holes survive the session.</h2>
+              <p>
+                Every build that fetches anything writes a cache — <code>.ariadne-cache.json</code>{" "}
+                unless you pass <code>--no-cache</code> — and it records not only what was
+                resolved but the tweet IDs that could <em>not</em> be. A parent that no source
+                could reach today is still listed tomorrow, so a later run can go get it without
+                repeating the original build.
+              </p>
+              <CodeBlock label="Terminal">{`ariadne cache list      # what each cache holds, and what is still missing
+ariadne cache missing   # the missing ids, one per line
+ariadne cache retry     # fetch them now, updating the cache in place`}</CodeBlock>
+              <p>
+                <code>ariadne cache retry</code> tries local dumps and free oEmbed by default. Add{" "}
+                <code>--community-archive</code>, <code>--twitterapi-key</code>, or{" "}
+                <code>--fetch</code> with an X bearer token for the stubborn ones, and{" "}
+                <code>--limit</code> to bound a run. Re-run your original build afterwards and the
+                recovered posts come back from the cache.
+              </p>
+              <div className="notice">
+                <strong>Retry after a build, not alongside one</strong>
+                <p>
+                  The cache write is last-writer-wins. Let a build using the same cache finish
+                  before retrying it, or one of the two writes will be lost.
+                </p>
+              </div>
+              <p className="finePrint">
+                The same operation is available as <code>ariadne.retry_cache()</code>, which
+                returns a <code>CacheRetryResult</code> carrying what was wanted, recovered, and
+                still missing.
+              </p>
+            </section>
+
             <section className="docSection" id="outputs">
-              <p className="kicker">06 · Output formats</p>
+              <p className="kicker">07 · Output formats</p>
               <h2>Choose the representation your next step needs.</h2>
               <div className="tableWrap">
                 <table>
@@ -309,14 +346,33 @@ ariadne build --archive archive.zip --for-user alice --format raft -o branches.j
 # Keep the normalized graph
 ariadne build --archive archive.zip --for-user alice --format json -o graph.json`}</CodeBlock>
               <div className="notice">
-                <strong>Role names describe position, not speaker intent</strong>
-                <p>In <code>messages</code> and <code>openai</code>, the root is <code>assistant</code> and later posts are <code>user</code>. In <code>raft</code>, later posts are <code>participant</code>.</p>
+                <strong>Roles follow authorship, not position</strong>
+                <p>
+                  The subject you collected speaks as <code>assistant</code> wherever they appear
+                  in a branch; everyone else is <code>user</code> in <code>messages</code> and{" "}
+                  <code>openai</code>, and <code>participant</code> in <code>raft</code>. A post
+                  whose author cannot be determined renders as <code>[deleted]</code>, and so does
+                  its text.
+                </p>
               </div>
+              <h3>Keep only the branches where your subject answers</h3>
+              <p>
+                Finetuning and Q/A datasets usually want exchanges, not broadcasts.{" "}
+                <code>--responses-only</code> keeps a branch only when the subject replies to or
+                quote-tweets somebody else, dropping standalone posts and pure self-threads. A
+                reply to a post nobody could resolve still counts — the missing parent was
+                somebody.
+              </p>
+              <CodeBlock label="Terminal">{`ariadne build \\
+  --archive archive.zip \\
+  --for-user alice \\
+  --responses-only \\
+  --format raft -o alice.jsonl`}</CodeBlock>
               <a className="referenceLink" href="https://github.com/lumpenspace/ariadne/blob/main/docs/SCHEMA.md">Inspect the output schemas <span aria-hidden="true">↗</span></a>
             </section>
 
             <section className="docSection" id="python">
-              <p className="kicker">07 · Python API</p>
+              <p className="kicker">08 · Python API</p>
               <h2>Run the same pipeline without a file round-trip.</h2>
               <p>The public API is typed and synchronous. Pass keywords for compact calls, or use <code>BuildOptions</code> when configuration should be reusable and inspectable.</p>
               <CodeBlock label="Python">{`from pathlib import Path
@@ -343,6 +399,7 @@ result.save("out/branches.jsonl", "raft")`}</CodeBlock>
                 <article><code>result.render(format)</code><span>Any renderer as text</span></article>
                 <article><code>result.messages()</code><span>Parsed enriched or strict messages</span></article>
                 <article><code>result.json_payload()</code><span>Parsed graph payload</span></article>
+                <article><code>ariadne.retry_cache()</code><span>Refetch a cache&apos;s missing posts</span></article>
               </div>
               <h3>Handle stable API errors</h3>
               <CodeBlock label="Python">{`try:
@@ -360,11 +417,11 @@ except ariadne.AriadneError as exc:
             </section>
 
             <section className="docSection" id="troubleshooting">
-              <p className="kicker">08 · Troubleshooting</p>
+              <p className="kicker">09 · Troubleshooting</p>
               <h2>Common problems have explicit fixes.</h2>
               <div className="faqList">
                 <details><summary>No posts matched</summary><p>Supply a tweet ID/URL or a target selector such as <code>--for-user</code>, <code>--author-id</code>, or <code>--all-loaded</code>. Check that <code>--since</code> is not too narrow.</p></details>
-                <details><summary>A parent is unavailable</summary><p>None of the selected sources resolved that ID. Add a richer archive or explicitly enable a structured network source. Use <code>--strict</code> only if partial branches should fail.</p></details>
+                <details><summary>A parent is unavailable</summary><p>None of the selected sources resolved that ID, so it renders as <code>[deleted]</code>. The cache remembers it: run <code>ariadne cache retry</code> later, optionally with a richer source enabled, then build again. Add a fuller archive, or use <code>--strict</code> only if partial branches should fail.</p></details>
                 <details><summary>A local timeline exceeds 10,000 posts</summary><p>Add a narrower <code>--since</code> date or an explicit <code>--dump-limit</code>. Explicit limits keep the newest matching posts.</p></details>
                 <details><summary>A Parquet import asks for DuckDB</summary><p>Install the optional dependency with <code>uv tool install &apos;ariadne-x[parquet]&apos;</code>.</p></details>
                 <details><summary>Search is unexpectedly slow</summary><p>The import may have been created with <code>--no-fts</code>. Re-import it without that flag to build the full-text index.</p></details>
@@ -393,16 +450,18 @@ uv run mypy src`}</CodeBlock>
                 <div><dt>Build</dt><dd><code>ariadne build</code></dd></div>
                 <div><dt>Explore</dt><dd><code>ariadne dumps interactive</code></dd></div>
                 <div><dt>Inspect</dt><dd><code>ariadne inspect-archive PATH</code></dd></div>
+                <div><dt>Recover</dt><dd><code>ariadne cache retry</code></dd></div>
                 <div><dt>Default format</dt><dd><code>messages</code></dd></div>
                 <div><dt>Default depth</dt><dd>50 ancestors</dd></div>
                 <div><dt>Default cache</dt><dd><code>.ariadne-cache.json</code></dd></div>
               </dl>
               <div className="railRule" />
-              <p className="railLabel">Three rules to remember</p>
+              <p className="railLabel">Four rules to remember</p>
               <ol className="railRules">
                 <li><span>01</span>Imported dumps join builds automatically.</li>
                 <li><span>02</span><code>--since</code> filters targets, not their ancestors.</li>
                 <li><span>03</span>Only sources with parent IDs can extend a branch.</li>
+                <li><span>04</span>Roles follow authorship: your subject is the assistant.</li>
               </ol>
               <a className="railLink" href="https://github.com/lumpenspace/ariadne">View source on GitHub ↗</a>
             </div>

@@ -137,8 +137,11 @@ See [Python API](API.md) for the complete build and query interfaces.
   it again without that flag.
 - **A build selects too many posts:** add `--since` or `--dump-limit`.
 - **A parent is still unavailable:** none of the selected archives knows that
-  tweet ID. Enable a structured network source only if local coverage is not
-  enough.
+  tweet ID, so it renders as `[deleted]`. Importing another archive that covers
+  the same period often fixes it — reply and quote edges are followed across
+  every selected import. Enable a structured network source only if local
+  coverage is not enough; `ariadne cache retry` can pick the gaps up later
+  without repeating the build.
 - **Disk usage is high:** each imported database is a normalized, indexed copy
   of the relevant source data. `ariadne dumps remove NAME` removes only that
   copy.

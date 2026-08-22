@@ -26,8 +26,10 @@ Ariadne merges those sources, selects the posts you care about, follows every kn
 reply-parent chain toward its root, attaches quote context, and renders the result
 root → target.
 
-It does not pretend sparse data is complete. Missing posts stay visible as
-placeholders and warnings unless you ask for `--strict`.
+It does not pretend sparse data is complete. A post it cannot resolve keeps its
+place in the branch as `[deleted]`, with a warning naming the id, so a gap is
+something you can see and count rather than a silent omission. Ask for
+`--strict` when you would rather fail than keep a partial branch.
 
 ## Start here
 
@@ -160,6 +162,10 @@ Ordinary archive builds stay local. `--target-user` is the convenience exception
 tries unofficial RSS and oEmbed unless disabled. Those sources can recover recent text
 but usually cannot prove reply edges. X API reads are separately opt-in through
 `--fetch` and `--fetch-user-timeline` and may be billable.
+
+`ariadne interactive` runs the free sources first and, before it offers the X API,
+says how many tweets are missing and how many conversations they would complete —
+so a billable pass is a decision made against a number.
 
 [Read the source and network policy →](docs/SOURCES.md)
 

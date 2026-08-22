@@ -51,6 +51,48 @@ plus a date, runs the cheap-source pass, prints a summary of tweets,
 conversations, unavailable output tweets, warnings, and sources, then asks
 whether to continue with X API.
 
+Before that question it states the size of the gap — how many tweets are
+missing, and how many conversations they would complete:
+
+```text
+◆ Cheap-source pass
+  tweets in store: 412
+  selected target tweets: 38
+  reconstructed conversations: 31
+  unavailable tweets in reconstructed output: 7
+  warnings: 4
+  sources: dump:personal: 380, oembed: 25, unofficial-rss:nitter.net: 7
+  …
+  7 tweet(s) are missing to complete 6 of 31 conversation(s)
+» Continue with X API now? This may cost API reads [y/N]
+```
+
+The count is deliberately shown before the prompt, not after it: X API reads
+may be billable, so the decision to spend them should be made against a number
+rather than a guess. When the cheap pass left nothing missing, it says so
+instead.
+
+## Recovering What Was Missing
+
+A build's cache records the tweet IDs it could not resolve, so a gap is not
+lost when the session ends. A later run can attempt them against whatever
+sources are available then — including ones you did not have or did not want
+to pay for at the time:
+
+```bash
+ariadne cache list      # what each cache holds, and what is still missing
+ariadne cache missing   # the missing ids, one per line
+ariadne cache retry     # fetch them now, updating the cache in place
+```
+
+`ariadne cache retry` uses local dumps and free oEmbed by default. Add
+`--community-archive`, `--twitterapi-key`, or `--fetch` with an X bearer token
+for the stubborn ones, and `--limit` to bound a run. Re-running the original
+build afterwards picks the recovered tweets up from the cache.
+
+The cache write is last-writer-wins, so run a retry after a build using the
+same cache has finished, not alongside it.
+
 ## Reconstruction Rule
 
 The branch builder can only complete a conversation when it knows the parent tweet ID for each reply. Text-only sources can improve content quality, but they cannot infer missing edges.

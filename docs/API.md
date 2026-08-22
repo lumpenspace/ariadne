@@ -75,7 +75,16 @@ Common options, all optional:
 | `dump`, `no_dumps`, `dump_limit` | Persistent local dump selection and timeline safety bound |
 | `cache`, `no_cache` | Tweet cache, default `.ariadne-cache.json` |
 | `strict`, `max_depth`, `no_quotes`, `quote_as_reply` | Reconstruction behaviour |
+| `responses_only` | Keep only branches in which the subject responds to somebody else |
 | `allow_empty` | Return an empty result instead of raising when nothing matches |
+| `format`, `output` | Defaults used by `result.render()` and the CLI |
+
+`responses_only=True` drops standalone posts and pure self-threads, keeping
+branches where the subject replied to or quote-tweeted someone — the shape most
+finetuning and Q/A datasets want. A reply to an unresolvable post still counts,
+since the missing parent was somebody. The predicate is public as
+`ariadne.conversation_has_response(conversation, store, subject=...)` if you
+would rather filter the conversations yourself.
 
 ### Errors
 
@@ -163,6 +172,45 @@ result.save("out.jsonl", "raft")   # returns the Path, makes parent dirs
 result.save_cache()                # only writes if this run fetched anything
 ```
 
+## Retrying a cache's missing posts
+
+A build's cache records the tweet IDs it could not resolve. `retry_cache()`
+re-attempts them from the cache file alone, so it can run in a later session,
+long after the build, against sources you did not have at the time:
+
+```python
+import ariadne
+
+outcome = ariadne.retry_cache(".ariadne-cache.json")
+
+print(len(outcome.wanted), "attempted")
+print(len(outcome.recovered), "recovered")
+print(len(outcome.still_missing), "still missing")
+
+if outcome:                    # truthy when anything was recovered
+    ariadne.build(archive="archive.zip", for_user="alice")   # now sees them
+```
+
+It tries local dumps and free oEmbed by default. Enable more sources per call:
+
+```python
+ariadne.retry_cache(
+    ".ariadne-cache.json",
+    limit=200,                 # oldest references first
+    community_archive=True,
+    twitterapi_key="...",
+    fetch=True, bearer_token="...",   # X API, potentially billable
+)
+```
+
+`CacheRetryResult` carries `path`, `wanted`, `recovered`, `still_missing`, and
+`warnings`, and is falsy when nothing was recovered. The cache is rewritten in
+place with whatever was found, and the ids that are still missing stay
+recorded — including any a `limit` never attempted.
+
+The cache write is last-writer-wins: retry after a build using the same cache
+has finished, not concurrently with it.
+
 ## `BuildOptions`
 
 `build(**kwargs)` is the concise form of `build(BuildOptions(...))`. Use the
@@ -205,12 +253,21 @@ documents = result.raft_documents()
 
 ```python
 from ariadne import (
-    load_archive, load_tweets_file,     # sources
-    TweetStore, Tweet, Conversation,    # models
-    render, raft_documents,             # rendering
-    load_cache, save_cache,             # cache
+    load_archive, load_tweets_file,          # sources
+    CommunityArchiveClient, TwitterApiIoClient,   # network providers
+    TweetStore, Tweet, TweetRef,             # models
+    Conversation, QuoteContext,
+    render, raft_documents,                  # rendering
+    message_conversations, json_payload,
+    load_cache, save_cache,                  # cache
+    retry_cache, CacheRetryResult,
+    conversation_has_response,               # the responses_only predicate
+    ariadne_home,                            # settings directory in use
 )
 ```
 
 These are the same building blocks `build()` composes, if you want to drive
-the reconstruction yourself.
+the reconstruction yourself. `render()`, `message_conversations()`, and
+`raft_documents()` take an optional `subject=` username; pass it to assign
+`assistant` by authorship when rendering conversations you assembled by hand.
+(`json_payload()` has no roles to assign, so it takes no subject.)
