@@ -15,7 +15,13 @@ The one-time pending trusted publisher on PyPI uses:
 
 For each release:
 
-1. Bump `__version__` in `src/ariadne/__init__.py` and run `uv lock`.
+1. Bump `__version__` in `src/ariadne/__init__.py`, then run
+   `uv lock --refresh-package ariadne-x`.
+
+   Plain `uv lock` will not notice the bump — it leaves the project's own
+   pinned version untouched and exits happily, which is how v0.6.0 shipped
+   with a lock file still claiming 0.5.1. `uv lock --check` does not catch
+   this either.
 2. Merge the release commit to `main` and wait for CI.
 3. Publish a GitHub Release with a matching `vX.Y.Z` tag.
 

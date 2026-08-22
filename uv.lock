@@ -3,7 +3,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "ariadne-x"
-version = "0.5.1"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "rich" },
