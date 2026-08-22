@@ -41,8 +41,20 @@ from .render import (
     raft_documents,
     render,
 )
+from .credentials import (
+    credentials_path,
+    delete_credential,
+    load_credential,
+    save_credential,
+)
 from .sources import load_tweets_file
-from .store import TweetStore, load_cache, save_cache
+from .store import (
+    TweetStore,
+    load_cache,
+    load_stream,
+    save_cache,
+    stream_path,
+)
 
 __all__ = [
     "__version__",
@@ -76,6 +88,14 @@ __all__ = [
     "load_tweets_file",
     "load_cache",
     "save_cache",
+    # Durable stream of paid fetches
+    "stream_path",
+    "load_stream",
+    # Remembered credentials
+    "credentials_path",
+    "load_credential",
+    "save_credential",
+    "delete_credential",
     # Cache retry
     "CacheRetryResult",
     "retry_cache",
@@ -93,4 +113,4 @@ __all__ = [
     "json_payload",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

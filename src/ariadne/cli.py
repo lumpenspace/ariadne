@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import re
 import sqlite3
 import sys
 from collections import Counter
@@ -32,12 +33,19 @@ from .api import (
     target_username,
 )
 from .archive import load_archive
+from .credentials import (
+    TWITTERAPI_KEY,
+    X_BEARER_TOKEN,
+    delete_credential,
+    load_credential,
+    save_credential,
+)
 from .dumps import LocalDumpsClient, import_dump, list_dumps, remove_dump
 from .fetch import XApiError
 from .ids import tweet_id_from_url, unique_preserve_order
 from .models import Tweet
 from .render import render
-from .store import cache_summary
+from .store import cache_summary, stream_path
 from .store import save_cache  # noqa: F401  (stays importable from ariadne.cli)
 
 
@@ -497,7 +505,16 @@ def bluesky_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def announce_stream(args: argparse.Namespace) -> None:
+    """Say where paid reads are being written before any of them happen."""
+    if (getattr(args, "fetch", False) or getattr(args, "fetch_user_timeline", False)) and not getattr(
+        args, "no_cache", False
+    ):
+        hx.say(f"streaming X API reads to {stream_path(args.cache)} as they arrive")
+
+
 def build(args: argparse.Namespace) -> int:
+    announce_stream(args)
     result = collect_conversations(args)
     emit_warnings(result.warnings)
 
@@ -543,7 +560,9 @@ def interactive(args: argparse.Namespace) -> int:
     all_loaded = not username and local_sources
     since = prompt("As far back as date [YYYY-MM-DD]")
     output_format = prompt_choice("Output format", ("messages", "openai", "json", "markdown", "raft"), default="messages")
-    output = prompt_path("Output file")
+    output = prompt_path(
+        "Output file", default=default_output_name(output_format, username, since)
+    )
     max_depth_text = prompt("Max reply depth", default="50")
     max_depth = positive_int(max_depth_text)
 
@@ -626,26 +645,60 @@ def interactive(args: argparse.Namespace) -> int:
     print_interactive_summary("Cheap-source pass", cheap_result)
     cheap_result.save_cache(args.cache)
 
-    missing_ids = unavailable_conversation_ids(cheap_result)
-    if missing_ids:
-        incomplete = sum(
-            1
-            for conversation in cheap_result.conversations
-            if conversation.all_ids & missing_ids
+    report_missing(cheap_result)
+    final_result = cheap_result
+
+    # Escalate one rung at a time, cheapest first. Each pass reuses the store
+    # the previous one filled, so nothing already found is fetched twice, and
+    # the gap is recounted between rungs -- a free source may close it and
+    # make the paid ones unnecessary.
+    if should_continue_with_x_api(cheap_result) and prompt_yes_no(
+        "Try the Community Archive? It is free, and covers donor accounts",
+        default=True,
+    ):
+        # RSS already ran in the cheap pass; re-running it would just repeat
+        # the same requests against the same feeds.
+        ca_args = replace(
+            cheap_args,
+            community_archive=True,
+            unofficial_rss=False,
+            no_unofficial_rss=True,
+            allow_empty=True,
         )
-        hx.say(
-            f"{len(missing_ids)} tweet(s) are missing to complete "
-            f"{incomplete} of {len(cheap_result.conversations)} conversation(s)"
+        final_result = build_conversations(ca_args, base_store=final_result.store)
+        print_interactive_summary("After Community Archive", final_result)
+        report_missing(final_result)
+
+    if should_continue_with_x_api(final_result) and prompt_yes_no(
+        "Try twitterapi.io? It is a paid gateway, but cheaper per read than X",
+        default=False,
+    ):
+        tapio_key = prompt_saved_secret(
+            "twitterapi.io API key",
+            credential=TWITTERAPI_KEY,
+            env_names=("TWITTERAPI_IO_KEY",),
         )
-    elif cheap_result.conversations:
-        hx.say("no tweets are missing; every reconstructed conversation is complete")
-    continue_default = should_continue_with_x_api(cheap_result)
+        if tapio_key:
+            tapio_args = replace(
+                cheap_args,
+                twitterapi_key=tapio_key,
+                unofficial_rss=False,
+                no_unofficial_rss=True,
+                allow_empty=True,
+            )
+            final_result = build_conversations(tapio_args, base_store=final_result.store)
+            print_interactive_summary("After twitterapi.io", final_result)
+            report_missing(final_result)
+            remember_secret("twitterapi.io key", TWITTERAPI_KEY, tapio_key)
+        else:
+            hx.warn("skipping twitterapi.io because no key was provided")
+
+    continue_default = should_continue_with_x_api(final_result)
     use_x_api = prompt_yes_no(
         "Continue with X API now? This may cost API reads",
         default=continue_default,
     )
 
-    final_result = cheap_result
     if use_x_api:
         token = prompt_x_api_token(local_sources=local_sources, has_username=bool(username))
         if token:
@@ -659,6 +712,7 @@ def interactive(args: argparse.Namespace) -> int:
                 if fetch_timeline:
                     pages = prompt("Max X timeline pages, 100 tweets/page")
                     max_user_pages = positive_int(pages) if pages else None
+            hx.say(f"streaming X API reads to {stream_path(args.cache)} as they arrive")
             paid_args = replace(
                 cheap_args,
                 fetch=True,
@@ -667,10 +721,16 @@ def interactive(args: argparse.Namespace) -> int:
                 max_user_pages=max_user_pages,
                 unofficial_rss=False,
                 no_unofficial_rss=True,
-                allow_empty=False,
+                allow_empty=True,
             )
-            final_result = build_conversations(paid_args, base_store=cheap_result.store)
+            final_result = build_conversations(paid_args, base_store=final_result.store)
             print_interactive_summary("After X API pass", final_result)
+            # Remember a token that worked; a rejected one is dropped by the
+            # pipeline itself, so only save when X was not shut off.
+            if x_api_succeeded(final_result):
+                remember_secret("X bearer token", X_BEARER_TOKEN, token)
+            else:
+                hx.warn("not remembering this X token: the API did not accept it")
         else:
             hx.warn("skipping X API because no bearer token was provided")
 
@@ -747,12 +807,65 @@ def should_continue_with_x_api(result: BuildResult) -> bool:
     return not result.conversations or bool(unavailable_conversation_ids(result))
 
 
-def prompt_x_api_token(*, local_sources: bool, has_username: bool) -> str:
-    env_token = os.environ.get("X_BEARER_TOKEN") or os.environ.get("TWITTER_BEARER_TOKEN")
-    if env_token:
-        if prompt_yes_no("Use X_BEARER_TOKEN/TWITTER_BEARER_TOKEN from the environment?", default=True):
-            return env_token
+def report_missing(result: BuildResult) -> None:
+    """State the size of the gap before offering to spend money on it."""
+    missing_ids = unavailable_conversation_ids(result)
+    if missing_ids:
+        incomplete = sum(
+            1
+            for conversation in result.conversations
+            if conversation.all_ids & missing_ids
+        )
+        hx.say(
+            f"{len(missing_ids)} tweet(s) are missing to complete "
+            f"{incomplete} of {len(result.conversations)} conversation(s)"
+        )
+    elif result.conversations:
+        hx.say("no tweets are missing; every reconstructed conversation is complete")
 
+
+def x_api_succeeded(result: BuildResult) -> bool:
+    """Whether the X pass ran without the pipeline switching X off."""
+    return not any("X API unavailable" in warning for warning in result.warnings)
+
+
+def remember_secret(label: str, credential: str, value: str) -> None:
+    """Save a working secret, telling the user where it went.
+
+    Storing a token is a side effect on the user's filesystem, so it is
+    announced with its path rather than done quietly.
+    """
+    if load_credential(credential) == value:
+        return
+    path = save_credential(credential, value)
+    if path is None:
+        hx.warn(f"could not save the {label}; you will be asked for it again")
+        return
+    hx.ok(f"saved the {label} to {path} (delete that file to forget it)")
+
+
+def prompt_saved_secret(
+    label: str,
+    *,
+    credential: str,
+    env_names: tuple[str, ...] = (),
+) -> str:
+    """Read a secret, preferring the environment and then a remembered one."""
+    for name in env_names:
+        value = os.environ.get(name)
+        if value:
+            if prompt_yes_no(f"Use {name} from the environment?", default=True):
+                return value
+    remembered = load_credential(credential)
+    if remembered:
+        if prompt_yes_no(f"Use the {label} saved from a previous run?", default=True):
+            return remembered
+        if prompt_yes_no("Forget that saved value?", default=False):
+            delete_credential(credential)
+    return prompt_secret(label)
+
+
+def prompt_x_api_token(*, local_sources: bool, has_username: bool) -> str:
     prompt_text = "X API bearer token for missing parents"
     if has_username:
         prompt_text += "/user timeline"
@@ -760,7 +873,11 @@ def prompt_x_api_token(*, local_sources: bool, has_username: bool) -> str:
         prompt_text += " (optional, may cost API reads)"
     else:
         prompt_text += " (needed if cheap sources found nothing)"
-    return prompt_secret(prompt_text)
+    return prompt_saved_secret(
+        prompt_text,
+        credential=X_BEARER_TOKEN,
+        env_names=("X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"),
+    )
 
 
 def infer_archive_username(path: str) -> str:
@@ -1159,9 +1276,37 @@ def prompt(label: str, *, default: str | None = None, required: bool = False) ->
         hx.warn("please enter a value")
 
 
-def prompt_path(label: str) -> str:
-    value = prompt(label)
+def prompt_path(label: str, *, default: str | None = None) -> str:
+    value = prompt(label, default=default)
     return str(Path(value).expanduser()) if value else ""
+
+
+OUTPUT_SUFFIXES = {
+    "messages": "json",
+    "openai": "json",
+    "json": "json",
+    "markdown": "md",
+    "raft": "jsonl",
+}
+
+
+def default_output_name(
+    output_format: str, username: str = "", since: str = ""
+) -> str:
+    """A filename that says what the file holds, so runs do not overwrite.
+
+    Interactive output is usually large enough that printing it to the
+    terminal loses it; naming a file by subject and range keeps successive
+    runs distinguishable without asking the user to invent a name.
+    """
+    parts = ["ariadne"]
+    handle = (username or "").strip().strip("@")
+    if handle:
+        parts.append(re.sub(r"[^A-Za-z0-9_-]+", "-", handle))
+    window = (since or "").strip()[:10]
+    if window:
+        parts.append(f"since-{re.sub(r'[^0-9-]+', '', window)}")
+    return f"{'-'.join(parts)}.{OUTPUT_SUFFIXES.get(output_format, 'txt')}"
 
 
 def prompt_existing_path(label: str) -> str:

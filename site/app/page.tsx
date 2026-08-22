@@ -318,6 +318,24 @@ ariadne cache retry     # fetch them now, updating the cache in place`}</CodeBlo
                   before retrying it, or one of the two writes will be lost.
                 </p>
               </div>
+              <h3>A failing X API does not end the run</h3>
+              <p>
+                X is the last and most expensive rung, so losing it should not cost you the
+                rungs below. Out of credits, rejected token, rate limit, or simply down: the
+                failure becomes a warning, X switches off for the rest of the build, and
+                everything the free sources reconstructed is still rendered.
+              </p>
+              <CodeBlock label="Terminal">{`warning: X API unavailable, continuing without it: the account is
+out of API credits (HTTP 402). Everything the other sources found is kept.`}</CodeBlock>
+              <p>
+                Paid reads are written down as they arrive, not held until the run succeeds:
+                each batch is appended to <code>&lt;cache&gt;.stream.jsonl</code> the moment it
+                is parsed. A run that dies later has still banked what it paid for, and the next
+                build folds that file back in. A bearer token that works is remembered in{" "}
+                <code>~/.ariadne/credentials.json</code>; one the API rejects is forgotten
+                immediately, while one that merely ran out of credits is kept for when the
+                account is topped up.
+              </p>
               <p className="finePrint">
                 The same operation is available as <code>ariadne.retry_cache()</code>, which
                 returns a <code>CacheRetryResult</code> carrying what was wanted, recovered, and
@@ -424,6 +442,7 @@ except ariadne.AriadneError as exc:
               <div className="faqList">
                 <details><summary>No posts matched</summary><p>Supply a tweet ID/URL or a target selector such as <code>--for-user</code>, <code>--author-id</code>, or <code>--all-loaded</code>. Check that <code>--since</code> is not too narrow.</p></details>
                 <details><summary>A parent is unavailable</summary><p>None of the selected sources resolved that ID, so it renders as <code>[deleted]</code>. The cache remembers it: run <code>ariadne cache retry</code> later, optionally with a richer source enabled, then build again. Add a fuller archive, or use <code>--strict</code> only if partial branches should fail.</p></details>
+                <details><summary>The X API returned 402, 401, or 429</summary><p>The build continues without X and keeps what the other sources found — the failure is a warning, not an error. For 402 the account is out of API credits; the token is still valid and is kept. For 401/403 the token was rejected and is forgotten, so the next run asks for a new one. Anything already fetched is in <code>&lt;cache&gt;.stream.jsonl</code>.</p></details>
                 <details><summary>A local timeline exceeds 10,000 posts</summary><p>Add a narrower <code>--since</code> date or an explicit <code>--dump-limit</code>. Explicit limits keep the newest matching posts.</p></details>
                 <details><summary>A Parquet import asks for DuckDB</summary><p>Install the optional dependency with <code>uv tool install &apos;ariadne-x[parquet]&apos;</code>.</p></details>
                 <details><summary>Search is unexpectedly slow</summary><p>The import may have been created with <code>--no-fts</code>. Re-import it without that flag to build the full-text index.</p></details>

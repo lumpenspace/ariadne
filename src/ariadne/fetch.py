@@ -5,6 +5,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from html import unescape
 from html.parser import HTMLParser
@@ -44,20 +45,61 @@ class FetchResult:
 
 
 class XApiError(SourceError):
-    pass
+    """An X API call failed. `status` is the HTTP code when there was one."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def is_auth_failure(self) -> bool:
+        """The token itself was rejected, so it will not work again as-is."""
+        return self.status in (401, 403)
+
+    @property
+    def is_billing_failure(self) -> bool:
+        """The token is fine but the account cannot pay for the read."""
+        return self.status == 402
+
+    @property
+    def is_rate_limited(self) -> bool:
+        return self.status == 429
+
+    def explain(self) -> str:
+        """A short reason suitable for a warning line."""
+        if self.is_billing_failure:
+            return "the account is out of API credits (HTTP 402)"
+        if self.is_auth_failure:
+            return f"the bearer token was rejected (HTTP {self.status})"
+        if self.is_rate_limited:
+            return "the API rate limit was hit (HTTP 429)"
+        return str(self)
 
 
 class XApiClient:
+    """X API v2 client.
+
+    `sink` receives every batch of tweets the moment it is parsed, before any
+    later request can fail. Paid reads are expensive, so they are handed off
+    for durable storage immediately rather than at the end of the run.
+    """
+
     def __init__(
         self,
         bearer_token: str,
         *,
         base_url: str = "https://api.x.com/2",
         timeout: float = 30.0,
+        sink: "Callable[[list[Tweet]], None] | None" = None,
     ) -> None:
         self.bearer_token = bearer_token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.sink = sink
+
+    def _emit(self, tweets: list[Tweet]) -> None:
+        if self.sink is not None and tweets:
+            self.sink(tweets)
 
     def get_posts(self, ids: list[str]) -> FetchResult:
         ids = unique_preserve_order(ids)
@@ -75,6 +117,7 @@ class XApiClient:
                     },
                 )
             )
+            self._emit(batch_result.tweets)
             result.tweets.extend(batch_result.tweets)
             result.errors.update(batch_result.errors)
         return result
@@ -113,6 +156,7 @@ class XApiClient:
                 params["pagination_token"] = next_token
             payload = self._request_json(f"/users/{urllib.parse.quote(str(user_id))}/tweets", params)
             page = tweets_from_api_payload(payload)
+            self._emit(page.tweets)
             result.tweets.extend(page.tweets)
             result.errors.update(page.errors)
             pages += 1
@@ -138,7 +182,9 @@ class XApiClient:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise XApiError(f"X API request failed with HTTP {exc.code}: {body}") from exc
+            raise XApiError(
+                f"X API request failed with HTTP {exc.code}: {body}", status=exc.code
+            ) from exc
         except urllib.error.URLError as exc:
             raise XApiError(f"X API request failed: {exc}") from exc
         if not isinstance(payload, dict):

@@ -19,15 +19,17 @@ so callers never have to round-trip through a file.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, TypedDict, Unpack, overload
 
 from ._types import OutputFormat, PathInput
 from .archive import load_archive
+from .credentials import X_BEARER_TOKEN, delete_credential, load_credential
 from .dumps import LocalDumpsClient
 from .errors import ConfigurationError, NoTargetsError
-from .fetch import FetchResult, OEmbedClient, XApiClient
+from .fetch import FetchResult, OEmbedClient, XApiClient, XApiError
 from .ids import extract_tweet_ids, extract_tweet_url_map, unique_preserve_order
 from .models import Conversation, Tweet
 from .providers import CommunityArchiveClient, TwitterApiIoClient
@@ -42,10 +44,13 @@ from .render import (
 from .sources import load_tweets_file, select_user_tweet_ids
 from .store import (
     TweetStore,
+    append_stream,
     cache_retry_ids,
     load_cache,
     load_missing_ids,
+    load_stream,
     save_cache,
+    stream_path,
 )
 from .timeutil import is_on_or_after, parse_since
 from .unofficial import NitterRssClient
@@ -492,7 +497,16 @@ def _run_build(
     else:
         store = base_store
         warnings = list(base_warnings or [])
-    x_client = make_x_client(options)
+    raw_x_client = make_x_client(options)
+    x_client = (
+        FailSoftXClient(
+            raw_x_client,
+            warnings,
+            forget_token=lambda: forget_bearer_token(resolve_bearer_token(options)),
+        )
+        if raw_x_client is not None
+        else None
+    )
     community = CommunityArchiveClient() if options.community_archive else None
     tapio_key = options.twitterapi_key or os.environ.get("TWITTERAPI_IO_KEY")
     tapio = TwitterApiIoClient(tapio_key) if tapio_key else None
@@ -615,16 +629,17 @@ def _run_build(
                 "Using X API user timeline only after cheap/local timeline sources have finished."
             )
         user = x_client.get_user_by_username(target_user)
-        timeline = x_client.get_user_posts(
-            str(user["id"]),
-            start_time=since,
-            max_pages=options.max_user_pages,
-        )
-        store.add_many(timeline.tweets, cacheable=True)
-        warnings.extend(
-            f"Could not fetch tweet {tweet_id}: {message}"
-            for tweet_id, message in timeline.errors.items()
-        )
+        if user is not None:
+            timeline = x_client.get_user_posts(
+                str(user["id"]),
+                start_time=since,
+                max_pages=options.max_user_pages,
+            )
+            store.add_many(timeline.tweets, cacheable=True)
+            warnings.extend(
+                f"Could not fetch tweet {tweet_id}: {message}"
+                for tweet_id, message in timeline.errors.items()
+            )
 
     if target_user or options.author_id or options.all_loaded:
         target_ids = select_targets(
@@ -786,18 +801,30 @@ def retry_cache(
                 bearer_token
                 or os.environ.get("X_BEARER_TOKEN")
                 or os.environ.get("TWITTER_BEARER_TOKEN")
+                or load_credential(X_BEARER_TOKEN)
             )
             if fetch and not token:
                 raise ConfigurationError(
                     "fetch=True requires bearer_token, X_BEARER_TOKEN, or TWITTER_BEARER_TOKEN"
                 )
             tapio_key = twitterapi_key or os.environ.get("TWITTERAPI_IO_KEY")
+            retry_x_client = (
+                FailSoftXClient(
+                    XApiClient(
+                        token, sink=lambda tweets: append_stream(stream_path(path), tweets)
+                    ),
+                    warnings,
+                    forget_token=lambda: forget_bearer_token(token),
+                )
+                if fetch and token
+                else None
+            )
             fetcher = make_branch_fetcher(
                 dumps=local_dumps,
                 community=CommunityArchiveClient() if community_archive else None,
                 tapio=TwitterApiIoClient(tapio_key) if tapio_key else None,
                 oembed=OEmbedClient(tweet_lookup=store.get) if oembed else None,
-                x_client=XApiClient(token) if fetch and token else None,
+                x_client=retry_x_client,
                 cheap_first=True,
             )
         if fetcher is None:
@@ -882,6 +909,14 @@ def load_store(options: BuildOptions) -> tuple[TweetStore, list[str]]:
     warnings: list[str] = []
     if not options.no_cache:
         store.add_many(load_cache(options.cache), cacheable=True)
+        # Paid fetches from a run that died before it could write the cache.
+        streamed = load_stream(stream_path(options.cache))
+        if streamed:
+            store.add_many(streamed, cacheable=True)
+            warnings.append(
+                f"Recovered {len(streamed)} tweet(s) from an earlier run's stream file "
+                f"({stream_path(options.cache)}); they will be folded into the cache."
+            )
 
     for archive_path in options.archive:
         archive_result = load_archive(archive_path)
@@ -895,12 +930,26 @@ def load_store(options: BuildOptions) -> tuple[TweetStore, list[str]]:
     return store, warnings
 
 
-def make_x_client(options: BuildOptions) -> XApiClient | None:
-    token = (
+def resolve_bearer_token(options: BuildOptions) -> str | None:
+    """The X token to use: explicit, then environment, then remembered."""
+    return (
         options.bearer_token
         or os.environ.get("X_BEARER_TOKEN")
         or os.environ.get("TWITTER_BEARER_TOKEN")
+        or load_credential(X_BEARER_TOKEN)
     )
+
+
+def make_stream_sink(options: BuildOptions):
+    """A sink that appends paid fetches to the cache's stream file."""
+    if options.no_cache:
+        return None
+    target = stream_path(options.cache)
+    return lambda tweets: append_stream(target, tweets)
+
+
+def make_x_client(options: BuildOptions) -> XApiClient | None:
+    token = resolve_bearer_token(options)
     if not token:
         if options.fetch:
             raise ConfigurationError(
@@ -908,8 +957,82 @@ def make_x_client(options: BuildOptions) -> XApiClient | None:
             )
         return None
     if options.fetch or options.fetch_user_timeline:
-        return XApiClient(token)
+        return XApiClient(token, sink=make_stream_sink(options))
     return None
+
+
+class FailSoftXClient:
+    """Wraps the X client so an API failure cannot end the build.
+
+    X is the last and most expensive source, reached only after the free ones
+    have run. If it refuses — out of credits, rejected token, rate limit, or
+    simply down — the conversations already reconstructed from archives, dumps
+    and oEmbed are still worth returning, so the failure becomes a warning and
+    the client switches itself off rather than being retried for every
+    remaining branch.
+
+    A token the API rejects outright is forgotten, so the next run asks for a
+    working one instead of failing the same way. A token that merely ran out
+    of credits is kept: it will work again once the account is topped up.
+    """
+
+    def __init__(
+        self,
+        client: XApiClient,
+        warnings: list[str],
+        *,
+        forget_token: "Callable[[], None] | None" = None,
+    ) -> None:
+        self.client = client
+        self.warnings = warnings
+        self.forget_token = forget_token
+        self.failure: XApiError | None = None
+
+    @property
+    def disabled(self) -> bool:
+        return self.failure is not None
+
+    def get_posts(self, ids: list[str]) -> FetchResult:
+        if self.disabled:
+            return FetchResult()
+        try:
+            return self.client.get_posts(ids)
+        except XApiError as exc:
+            self._record(exc)
+            return FetchResult()
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        if self.disabled:
+            return None
+        try:
+            return self.client.get_user_by_username(username)
+        except XApiError as exc:
+            self._record(exc)
+            return None
+
+    def get_user_posts(self, user_id: str, **kwargs: Any) -> FetchResult:
+        if self.disabled:
+            return FetchResult()
+        try:
+            return self.client.get_user_posts(user_id, **kwargs)
+        except XApiError as exc:
+            self._record(exc)
+            return FetchResult()
+
+    def _record(self, exc: XApiError) -> None:
+        self.failure = exc
+        self.warnings.append(
+            f"X API unavailable, continuing without it: {exc.explain()}. "
+            "Everything the other sources found is kept."
+        )
+        if exc.is_auth_failure and self.forget_token is not None:
+            self.forget_token()
+
+
+def forget_bearer_token(token: str | None) -> None:
+    """Drop the remembered token, but only if it is the one that just failed."""
+    if token and load_credential(X_BEARER_TOKEN) == token:
+        delete_credential(X_BEARER_TOKEN)
 
 
 class CheapFirstFetcher:
@@ -1019,7 +1142,7 @@ def make_branch_fetcher(
     community: TweetFetcher | None = None,
     tapio: TweetFetcher | None = None,
     oembed: OEmbedClient | None,
-    x_client: XApiClient | None,
+    x_client: "XApiClient | FailSoftXClient | None",
     cheap_first: bool,
 ) -> TweetFetcher | None:
     paid_first: TweetFetcher | None
@@ -1108,7 +1231,7 @@ def rss_bases(options: BuildOptions) -> list[str]:
 
 
 def enrich_after_cheap_sources(
-    store: TweetStore, x_client: XApiClient, target_ids: list[str]
+    store: TweetStore, x_client: "XApiClient | FailSoftXClient", target_ids: list[str]
 ) -> list[str]:
     ids_to_enrich = [
         tweet_id
@@ -1167,7 +1290,7 @@ def candidate_reply_lookup_ids(
 
 def should_save_cache(
     options: BuildOptions,
-    x_client: XApiClient | None,
+    x_client: "XApiClient | FailSoftXClient | None",
     *,
     oembed: OEmbedClient | None,
     use_unofficial: bool,

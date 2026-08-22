@@ -828,5 +828,270 @@ class MenuNavigationTests(unittest.TestCase):
             self.assertIsNone(_choose_with_keys("Pick", ["a", "b"], 0))
 
 
+class FailingXClient:
+    """An X client that raises on every call, like a depleted account."""
+
+    def __init__(self, status: int) -> None:
+        from ariadne.fetch import XApiError
+
+        self.status = status
+        self.calls = 0
+        self._error = XApiError(f"X API request failed with HTTP {status}", status=status)
+
+    def get_posts(self, ids):
+        self.calls += 1
+        raise self._error
+
+    def get_user_by_username(self, username):
+        self.calls += 1
+        raise self._error
+
+    def get_user_posts(self, user_id, **kwargs):
+        self.calls += 1
+        raise self._error
+
+
+class XApiFailureTests(unittest.TestCase):
+    """A failing X API must not throw away what the free sources found."""
+
+    def dump_with_a_hole(self, tmp):
+        path = Path(tmp) / "dump.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "tweets": [
+                        {
+                            "id": "2",
+                            "text": "reply to a hole",
+                            "username": "bob",
+                            "created_at": "2024-01-01T00:00:00Z",
+                            "in_reply_to_id": "1",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_credits_depleted_degrades_to_a_warning(self) -> None:
+        from ariadne.api import FailSoftXClient
+
+        warnings: list[str] = []
+        client = FailSoftXClient(FailingXClient(402), warnings)
+
+        result = client.get_posts(["1"])
+
+        self.assertEqual(result.tweets, [])
+        self.assertTrue(client.disabled)
+        self.assertIn("out of API credits", warnings[0])
+
+    def test_client_switches_itself_off_after_one_failure(self) -> None:
+        from ariadne.api import FailSoftXClient
+
+        failing = FailingXClient(402)
+        client = FailSoftXClient(failing, [])
+
+        for _ in range(5):
+            client.get_posts(["1"])
+
+        # One real attempt, then it stops asking a dead API.
+        self.assertEqual(failing.calls, 1)
+
+    def test_user_lookup_failure_returns_none_instead_of_raising(self) -> None:
+        from ariadne.api import FailSoftXClient
+
+        client = FailSoftXClient(FailingXClient(500), [])
+        self.assertIsNone(client.get_user_by_username("alice"))
+        self.assertEqual(client.get_user_posts("7").tweets, [])
+
+    def test_build_survives_a_depleted_account(self) -> None:
+        """The whole point: a 402 mid-build still returns the cheap results."""
+        from ariadne import api
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dump_path = self.dump_with_a_hole(tmp)
+            original = api.make_x_client
+            api.make_x_client = lambda options: FailingXClient(402)
+            try:
+                result = api.build_conversations(
+                    api.BuildOptions(
+                        tweets_file=[str(dump_path)],
+                        for_user="bob",
+                        fetch=True,
+                        bearer_token="token",
+                        no_dumps=True,
+                        no_cache=True,
+                    )
+                )
+            finally:
+                api.make_x_client = original
+
+        self.assertEqual(len(result.conversations), 1)
+        self.assertTrue(
+            any("X API unavailable" in warning for warning in result.warnings),
+            result.warnings,
+        )
+
+    def test_rejected_token_is_forgotten_but_a_broke_one_is_kept(self) -> None:
+        from ariadne.api import FailSoftXClient
+
+        for status, should_forget in ((401, True), (403, True), (402, False), (500, False)):
+            with self.subTest(status=status):
+                forgotten = []
+                client = FailSoftXClient(
+                    FailingXClient(status), [], forget_token=lambda: forgotten.append(True)
+                )
+                client.get_posts(["1"])
+                self.assertEqual(bool(forgotten), should_forget)
+
+
+class StreamingTests(unittest.TestCase):
+    """Paid reads are written to disk the moment they arrive."""
+
+    def test_fetched_tweets_are_streamed_before_a_later_call_fails(self) -> None:
+        from ariadne.fetch import XApiClient
+        from ariadne.store import append_stream, load_stream, stream_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache.json"
+            target = stream_path(cache)
+            client = XApiClient("token", sink=lambda tweets: append_stream(target, tweets))
+            payloads = [
+                {"data": [{"id": "1", "text": "first", "author_id": "9"}]},
+                RuntimeError("network died"),
+            ]
+
+            def fake_request(path, params):
+                item = payloads.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+
+            client._request_json = fake_request
+            with self.assertRaises(RuntimeError):
+                client.get_posts([str(n) for n in range(150)])  # two batches
+
+            recovered = load_stream(target)
+            self.assertEqual([tweet.id for tweet in recovered], ["1"])
+            self.assertEqual(recovered[0].text, "first")
+
+    def test_stream_survives_a_truncated_final_line(self) -> None:
+        from ariadne.store import append_stream, load_stream, stream_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = stream_path(Path(tmp) / "cache.json")
+            append_stream(target, [Tweet(id="1", text="kept", username="alice")])
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write('{"id": "2", "text": "trunc')
+
+            recovered = load_stream(target)
+            self.assertEqual([tweet.id for tweet in recovered], ["1"])
+
+    def test_saving_the_cache_clears_the_stream(self) -> None:
+        from ariadne.store import append_stream, save_cache, stream_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache.json"
+            target = stream_path(cache)
+            append_stream(target, [Tweet(id="1", text="kept", username="alice")])
+            self.assertTrue(target.exists())
+
+            save_cache(cache, [Tweet(id="1", text="kept", username="alice")])
+
+            self.assertFalse(target.exists())
+            self.assertTrue(cache.exists())  # the cache itself must survive
+
+    def test_clear_stream_refuses_to_delete_a_cache(self) -> None:
+        from ariadne.store import clear_stream
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache.json"
+            cache.write_text("{}", encoding="utf-8")
+            clear_stream(cache)
+            self.assertTrue(cache.exists())
+
+    def test_a_build_recovers_a_previous_runs_stream(self) -> None:
+        from ariadne.api import BuildOptions, load_store
+        from ariadne.store import append_stream, stream_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache.json"
+            append_stream(
+                stream_path(cache), [Tweet(id="55", text="paid for", username="alice")]
+            )
+            store, warnings = load_store(BuildOptions(cache=str(cache)))
+
+            self.assertIsNotNone(store.get("55"))
+            self.assertTrue(any("stream file" in warning for warning in warnings))
+
+
+class DefaultOutputNameTests(unittest.TestCase):
+    def test_name_describes_subject_and_format(self) -> None:
+        from ariadne.cli import default_output_name
+
+        self.assertEqual(
+            default_output_name("markdown", "alice", "2024-01-01"),
+            "ariadne-alice-since-2024-01-01.md",
+        )
+        self.assertEqual(default_output_name("raft", "@bob"), "ariadne-bob.jsonl")
+        self.assertEqual(default_output_name("messages"), "ariadne.json")
+
+    def test_hostile_handles_do_not_escape_the_filename(self) -> None:
+        from ariadne.cli import default_output_name
+
+        name = default_output_name("json", "../../etc/passwd")
+        self.assertNotIn("/", name)
+        self.assertTrue(name.endswith(".json"))
+
+
+class CredentialTests(unittest.TestCase):
+    def use_temp_home(self, tmp):
+        import os
+        from unittest import mock
+
+        return mock.patch.dict(os.environ, {"ARIADNE_HOME": tmp})
+
+    def test_round_trip_and_delete(self) -> None:
+        from ariadne.credentials import (
+            X_BEARER_TOKEN,
+            delete_credential,
+            load_credential,
+            save_credential,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, self.use_temp_home(tmp):
+            self.assertIsNone(load_credential(X_BEARER_TOKEN))
+            save_credential(X_BEARER_TOKEN, "secret")
+            self.assertEqual(load_credential(X_BEARER_TOKEN), "secret")
+            self.assertTrue(delete_credential(X_BEARER_TOKEN))
+            self.assertIsNone(load_credential(X_BEARER_TOKEN))
+            self.assertFalse(delete_credential(X_BEARER_TOKEN))
+
+    def test_stored_file_is_not_world_readable(self) -> None:
+        import os
+        import stat
+
+        from ariadne.credentials import X_BEARER_TOKEN, credentials_path, save_credential
+
+        if os.name != "posix":
+            self.skipTest("POSIX permissions only")
+        with tempfile.TemporaryDirectory() as tmp, self.use_temp_home(tmp):
+            save_credential(X_BEARER_TOKEN, "secret")
+            mode = credentials_path().stat().st_mode
+            self.assertEqual(stat.S_IMODE(mode) & 0o077, 0)
+
+    def test_forget_only_removes_the_token_that_failed(self) -> None:
+        from ariadne.api import forget_bearer_token
+        from ariadne.credentials import X_BEARER_TOKEN, load_credential, save_credential
+
+        with tempfile.TemporaryDirectory() as tmp, self.use_temp_home(tmp):
+            save_credential(X_BEARER_TOKEN, "the-good-one")
+            forget_bearer_token("a-different-token")
+            self.assertEqual(load_credential(X_BEARER_TOKEN), "the-good-one")
+            forget_bearer_token("the-good-one")
+            self.assertIsNone(load_credential(X_BEARER_TOKEN))
+
+
 if __name__ == "__main__":
     unittest.main()

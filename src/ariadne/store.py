@@ -87,6 +87,63 @@ def load_cache(path: str | Path) -> list[Tweet]:
     return [Tweet.from_dict(row) for row in rows if isinstance(row, dict) and row.get("id")]
 
 
+def stream_path(cache: str | Path) -> Path:
+    """The append-only sidecar that paid fetches are written to as they land."""
+    cache_path = Path(cache).expanduser()
+    return cache_path.with_name(cache_path.name + ".stream.jsonl")
+
+
+def append_stream(path: str | Path, tweets: list[Tweet]) -> None:
+    """Append tweets to the stream file, one JSON object per line.
+
+    Called from inside a fetch, so it must never raise into the fetch: losing
+    the sidecar is worse than useless only if it also loses the tweets that
+    are still on their way. Failures here are silent by design.
+    """
+    if not tweets:
+        return
+    target = Path(path).expanduser()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            for tweet in tweets:
+                handle.write(json.dumps(tweet.to_dict(include_raw=True), sort_keys=True) + "\n")
+    except OSError:
+        return
+
+
+def load_stream(path: str | Path) -> list[Tweet]:
+    """Tweets recorded by a previous run's stream file, ignoring bad lines.
+
+    A truncated final line is expected after a crash — the whole point of the
+    file is that it survives one — so unparseable lines are skipped rather
+    than failing the load.
+    """
+    target = Path(path).expanduser()
+    if not target.exists():
+        return []
+    tweets: list[Tweet] = []
+    with target.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("id"):
+                tweets.append(Tweet.from_dict(row))
+    return tweets
+
+
+def clear_stream(path: str | Path) -> None:
+    """Delete a stream file. `path` is the stream itself, not the cache."""
+    target = Path(path).expanduser()
+    if target.name.endswith(".stream.jsonl"):
+        target.unlink(missing_ok=True)
+
+
 def save_cache(
     path: str | Path, tweets: list[Tweet], *, missing: list[str] | None = None
 ) -> None:
@@ -110,6 +167,9 @@ def save_cache(
     tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp_path.replace(cache_path)
+    # Everything the stream file was protecting is now in the cache, so it can
+    # go; otherwise it would grow without bound across runs.
+    clear_stream(stream_path(cache_path))
 
 
 def load_missing_ids(path: str | Path) -> list[str]:

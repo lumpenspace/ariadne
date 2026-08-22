@@ -202,6 +202,33 @@ a run. Re-running the original `ariadne build` afterwards picks the
 recovered tweets up from the cache. The cache write is last-writer-wins, so
 retry after a build using the same cache has finished, not alongside it.
 
+## When the X API says no
+
+X is the last and most expensive rung, so a failure there does not end the
+run. Out of credits, rejected token, rate limit, or simply down: the failure
+becomes a warning, X switches off for the rest of the build, and everything
+the free sources already reconstructed is still rendered.
+
+```text
+warning: X API unavailable, continuing without it: the account is out of API
+credits (HTTP 402). Everything the other sources found is kept.
+```
+
+Paid reads are never held in memory waiting for a run to succeed. Each batch
+is appended to `<cache>.stream.jsonl` the moment it arrives, so a run that
+dies later has still banked what it paid for; the next build folds that file
+back in and clears it once the tweets are safely in the cache.
+
+A bearer token that works is remembered in `~/.ariadne/credentials.json`
+(owner-only) so you are not asked for it again. A token the API *rejects* is
+forgotten immediately — but one that merely ran out of credits is kept, since
+it will work again once the account is topped up.
+
+`ariadne interactive` climbs the rungs in cost order, recounting the gap
+between each, and stops as soon as it closes: local and cache, then free
+RSS and oEmbed, then the free Community Archive, then twitterapi.io, and only
+then X.
+
 ## Reference
 
 - [Documentation site](https://ariadne.hyperplex.org)

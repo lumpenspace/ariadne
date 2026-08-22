@@ -175,6 +175,54 @@ result.save("out.jsonl", "raft")   # returns the Path, makes parent dirs
 result.save_cache()                # only writes if this run fetched anything
 ```
 
+## X API failures, streamed reads, and saved tokens
+
+`build()` does not raise when the X API refuses. The failure is appended to
+`result.warnings`, X is switched off for the remainder of the call, and the
+conversations the other sources produced are returned as usual:
+
+```python
+result = ariadne.build(archive="archive.zip", for_user="alice",
+                       fetch=True, bearer_token="...")
+
+if any("X API unavailable" in warning for warning in result.warnings):
+    ...   # still a normal BuildResult, just without X's contribution
+```
+
+`XApiError` carries the HTTP status and classifies itself, which is what the
+pipeline uses to decide whether a token is worth keeping:
+
+```python
+exc.status              # 402
+exc.is_billing_failure  # True  -- valid token, unfunded account
+exc.is_auth_failure     # True for 401/403 -- the token itself is bad
+exc.is_rate_limited     # True for 429
+exc.explain()           # "the account is out of API credits (HTTP 402)"
+```
+
+Tweets the X API returns are appended to a stream file as each batch arrives,
+so a run that dies later keeps what it paid for:
+
+```python
+from ariadne import stream_path, load_stream
+
+recovered = load_stream(stream_path(".ariadne-cache.json"))
+```
+
+A build loads that file automatically, folds it into the store, and
+`save_cache` clears it once the tweets are cached. Pass `no_cache=True` to
+disable streaming along with the cache.
+
+Tokens are remembered between runs, after the environment and any explicit
+argument:
+
+```python
+from ariadne import credentials_path, load_credential, save_credential, delete_credential
+```
+
+A token rejected with 401/403 is deleted automatically; one that returns 402
+is kept, because it will work again once the account is funded.
+
 ## Retrying a cache's missing posts
 
 A build's cache records the tweet IDs it could not resolve. `retry_cache()`

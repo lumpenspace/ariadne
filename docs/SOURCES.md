@@ -47,7 +47,9 @@ use those IDs as candidates, but X API or a richer dump is needed to prove which
 ones are replies.
 
 Interactive mode follows the same policy. It asks for an archive or dump path,
-a username, a date, an output format and file, a maximum reply depth, and then
+a username, a date, an output format, an output file (defaulting to a name
+built from the subject and date, so runs do not overwrite each other or
+disappear into the terminal), a maximum reply depth, and then
 which sources to allow: oEmbed hydration, unofficial RSS (with bases and
 templates), whether to start only from replies, and whether to keep only
 conversations in which the user responds to somebody else — the interactive
@@ -59,9 +61,20 @@ flows straight into this run.
 
 It then runs the cheap-source pass and prints a summary — tweets in store,
 selected targets, reconstructed conversations, unavailable output tweets,
-warnings, and a count per source. Before offering the X API it states the size
-of the gap: how many tweets are missing, and how many conversations they would
-complete.
+warnings, and a count per source. Before offering anything paid it states the
+size of the gap: how many tweets are missing, and how many conversations they
+would complete.
+
+From there it climbs one rung at a time, cheapest first, recounting the gap
+after each so a free source that closes it stops the climb:
+
+1. the free **Community Archive**, offered by default;
+2. **twitterapi.io**, a paid gateway but cheaper per read than X, off by
+   default and asked for only if a gap remains;
+3. the **X API** last.
+
+Each pass reuses the store the previous one filled, so nothing already found
+is fetched twice.
 
 ```text
 ◆ Cheap-source pass
@@ -75,6 +88,8 @@ complete.
     oembed: 25
     unofficial-rss:nitter.net: 7
   7 tweet(s) are missing to complete 6 of 31 conversation(s)
+» Try the Community Archive? It is free, and covers donor accounts [Y/n]
+» Try twitterapi.io? It is a paid gateway, but cheaper per read than X [y/N]
 » Continue with X API now? This may cost API reads [Y/n]
 ```
 
@@ -82,6 +97,44 @@ The count is deliberately shown before the prompt, not after it: X API reads
 may be billable, so the decision to spend them should be made against a number
 rather than a guess. When the cheap pass left nothing missing, it says so
 instead — and the default answer flips to no, since there is nothing to buy.
+
+## When a Source Fails
+
+Community Archive, twitterapi.io, and the unofficial RSS feeds have always
+reported their failures as warnings and let the build continue. Since 0.7 the
+X API behaves the same way. It is the last and most expensive rung, so losing
+it should not cost you the rungs below:
+
+```text
+warning: X API unavailable, continuing without it: the account is out of API
+credits (HTTP 402). Everything the other sources found is kept.
+```
+
+The first failure switches X off for the remainder of the run rather than
+being retried once per branch, and the build finishes on what the other
+sources produced. `--strict` still fails the build when a branch cannot be
+completed, which is the flag to use when a partial result is worse than none.
+
+### Paid reads are written down immediately
+
+Every batch the X API returns is appended to `<cache>.stream.jsonl` as soon as
+it is parsed — before any later request can fail. If a run dies after spending
+money, the next build reads that file back, folds it into the store, and
+clears it once the tweets are in the cache proper. Nothing you paid for is
+lost to a crash. `--no-cache` disables this along with the cache itself.
+
+### Remembered credentials
+
+A bearer token that works is saved to `~/.ariadne/credentials.json` with
+owner-only permissions, so later runs do not ask for it. Resolution order is
+explicit option, then `X_BEARER_TOKEN` / `TWITTER_BEARER_TOKEN`, then the
+saved value.
+
+A token the API rejects outright (HTTP 401 or 403) is deleted as soon as it
+fails, so the next run asks for a working one instead of repeating the same
+error. A token that is merely out of credits (HTTP 402) is kept — it is a
+valid token and will work again once the account is funded. The file is plain
+JSON on your own disk; delete it to forget everything in it.
 
 ## Recovering What Was Missing
 
