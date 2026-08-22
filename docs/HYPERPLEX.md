@@ -3,8 +3,9 @@
 raft, [ariadne](https://github.com/lumpenspace/ariadne), and
 [opbdh](https://github.com/lumpenspace/opbdh) share one terminal language, so the
 interactive flows and their outputs read as a family. The implementation is a small
-`hx.py` module vendored identically in each repo — only the three identity constants
-change.
+`hx.py` module vendored into each repo. The shared core is identical and only the
+three identity constants change; a repo may carry an extra helper for a dependency
+the others do not have.
 
 ## Identity
 
@@ -30,7 +31,9 @@ and the mark `⟡`. raft's mint is the site's linked-node color.
   scripts) it falls back to the numbered prompt, so scripted input keeps
   working. The key handling is hand-rolled termios + ANSI repaint — no extra
   dependency, no screen takeover. opbdh's questionary prompts already behave
-  this way natively; `hx.questionary_style()` skins them to the palette.
+  this way natively, and its copy of `hx.py` adds a `questionary_style()` helper
+  to skin them to the palette — ariadne and raft do not use questionary, so
+  their copies do not carry it.
 - **Status**: steps `◆` in accent; results `✓` green / `!` yellow / `✗` red; secondary
   detail dim.
 - **stdout is sacred**: all chrome goes to **stderr**, so piped output stays

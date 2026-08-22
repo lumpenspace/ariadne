@@ -23,23 +23,39 @@ appear in a branch. Everybody else is `user` in `messages` and `openai`, and
 
 This is authorship, not position: the subject is the assistant even when they
 opened the thread, and a post in the middle of a branch is a `user` turn if
-somebody else wrote it. When no subject was named, the author of each branch's
-target tweet plays that role instead. A target tweet whose author cannot be
-determined at all still speaks as `assistant`, since it is the post you asked
-for.
+somebody else wrote it. When a subject *is* named, a branch's own target tweet
+falls back to `assistant` only if its author cannot be determined at all.
 
-### Unresolvable posts render as `[deleted]`
+When no subject was named — a build driven by bare tweet IDs, for instance —
+the author of each branch's target tweet becomes the subject for that branch,
+and the target tweet itself is always `assistant`.
 
-A post that no source could resolve — deleted, suspended, protected, or simply
-absent from every archive you gave it — keeps its place in the branch and
-renders as `[deleted]` in both the author field and the text. A post that was
-resolved but whose author is unknown is attributed to `[deleted]` too, while
-keeping its own text.
+### A post Ariadne could not get keeps its place
 
-Nothing is silently dropped: the branch also carries a warning naming the
-tweet ID, and the ID stays in `tweet_ids` / `all_tweet_ids` so you can count
-the holes or go fetch them later with `ariadne cache retry`. Pass `--strict`
-to fail the build instead of rendering a partial branch.
+Missing posts are never dropped from a branch — removing them would silently
+change the shape of the conversation. They are rendered as placeholders
+instead, and there are two, because "missing" has two flavours:
+
+| Rendered as | When | Author shown as | Warning? |
+| --- | --- | --- | --- |
+| `[deleted]` | nothing at all is known about the post — deleted, suspended, protected, or absent from every source you gave it | `[deleted]` | yes, naming the id |
+| `[tweet <id> has no text]` | the post is known *about* but its text was never retrieved | the real `@handle` | no |
+
+The second case is easy to hit and worth understanding. A personal X archive
+records the handle you replied to (`in_reply_to_screen_name`), so Ariadne can
+place that parent in the branch, attribute it, and link it — while having
+nothing of what it said. Community dumps, twitterapi.io, and generic tweet
+files can all produce the same partial knowledge. Because the post is *known*,
+this case is not a warning; it will not appear in your warning count, and only
+the placeholder text distinguishes it from a post that was fetched in full.
+
+Separately, a post whose text was retrieved but whose author is unknown is
+attributed to `[deleted]` while keeping its own text.
+
+In every case the id stays in `tweet_ids` / `all_tweet_ids`, and in the `json`
+format the record carries `available: false` for the first case. Both kinds
+can be retried later with `ariadne cache retry`. Pass `--strict` to fail the
+build rather than render a partial branch.
 
 ## `json`
 
@@ -64,8 +80,10 @@ and `content`. Consumers extract `conversations[i].messages`.
 
 ## `markdown`
 
-A human-readable view: one section per branch, headed by its target ID, in
-root-to-target order with attribution, quote context, and warnings.
+A human-readable view: each branch in root-to-target order with attribution,
+quote context, and warnings. When a render contains more than one branch, each
+is headed by `## Conversation N: <target id>`; a single-branch render has no
+such heading.
 
 Consecutive posts by the same author merge into one message — a single role
 header, then the timestamp and URL of every post in the run, then the texts

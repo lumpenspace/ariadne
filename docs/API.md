@@ -18,8 +18,11 @@ Runs the whole pipeline — load sources, select targets, reconstruct reply
 branches, hydrate missing text — and returns a `BuildResult`.
 
 Keyword names match the CLI flags with dashes turned into underscores:
-`--for-user` is `for_user`, `--no-quotes` is `no_quotes`. List-valued options
-accept a bare string, so `archive="a.zip"` and `archive=["a.zip"]` are the same.
+`--for-user` is `for_user`, `--no-quotes` is `no_quotes`. Two do not line up
+exactly: `quote_as_reply` defaults to `True` and is turned off by the
+`--no-quote-as-reply` flag, and `allow_empty` is API-only — the CLI always
+raises when nothing matches. List-valued options accept a bare string, so
+`archive="a.zip"` and `archive=["a.zip"]` are the same.
 Filesystem inputs also accept `pathlib.Path` and other `os.PathLike` objects.
 `BuildKwargs` and `OutputFormat` describe the complete typed surface, and the
 wheel includes a `py.typed` marker.
@@ -196,7 +199,7 @@ It tries local dumps and free oEmbed by default. Enable more sources per call:
 ```python
 ariadne.retry_cache(
     ".ariadne-cache.json",
-    limit=200,                 # oldest references first
+    limit=200,                 # bound the run; see ordering note below
     community_archive=True,
     twitterapi_key="...",
     fetch=True, bearer_token="...",   # X API, potentially billable
@@ -207,6 +210,12 @@ ariadne.retry_cache(
 `warnings`, and is falsy when nothing was recovered. The cache is rewritten in
 place with whatever was found, and the ids that are still missing stay
 recorded — including any a `limit` never attempted.
+
+`limit` takes from the front of the retry set, which is ordered by kind rather
+than by date: ids the cache explicitly recorded as missing come first (sorted
+as strings, which for snowflake ids is not chronological), then reply and quote
+references that were never fetched, then textless stubs. Treat a limited run as
+"some of them", not "the oldest ones".
 
 The cache write is last-writer-wins: retry after a build using the same cache
 has finished, not concurrently with it.

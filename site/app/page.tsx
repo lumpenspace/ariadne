@@ -138,10 +138,12 @@ export default function Home() {
               <div className="notice importantNotice">
                 <strong>What reconstruction means</strong>
                 <p>
-                  Ariadne follows the parent IDs your sources know about. A post it cannot
-                  resolve stays visible as <code>[deleted]</code> rather than vanishing, so a gap
-                  in a branch is something you can see and count; use <code>--strict</code> when
-                  you would rather fail than keep a partial branch.
+                  Ariadne follows the parent IDs your sources know about. A post it cannot get
+                  keeps its place in the branch instead of vanishing: one it knows nothing about
+                  renders as <code>[deleted]</code> and raises a warning, and one it can name but
+                  never fetched keeps its author and reads{" "}
+                  <code>[tweet &lt;id&gt; has no text]</code>. Use <code>--strict</code> when you
+                  would rather fail than keep a partial branch.
                 </p>
               </div>
               <h3>1. Install the command</h3>
@@ -171,7 +173,7 @@ ariadne --help`}</CodeBlock>
               <p className="kicker">02 · Choose an input</p>
               <h2>Start with the data you already have.</h2>
               <div className="workflowGrid">
-                <article><span>One archive</span><h3>Build without importing</h3><code>--archive PATH</code><p>Use a personal export or Community Archive folder, ZIP, or data file once.</p></article>
+                <article><span>One archive</span><h3>Build without importing</h3><code>--archive PATH</code><p>Use a personal X export — folder, ZIP, or data file — once. Community Archive CSV exports go through <code>dumps import</code> or <code>--tweets-file</code> instead.</p></article>
                 <article><span>Reusable collection</span><h3>Import into the library</h3><code>ariadne dumps import PATH</code><p>Normalize and index archives you want to search or combine repeatedly.</p></article>
                 <article><span>CSV / JSON / JSONL</span><h3>Load generic records</h3><code>--tweets-file PATH</code><p>Fields survive when the source provides them; sparse input may not contain reply edges.</p></article>
                 <article><span>Known posts</span><h3>Pass IDs or X URLs</h3><code>ariadne build [ITEM ...]</code><p>Combine positional items with local sources or an explicitly enabled API fallback.</p></article>
@@ -203,7 +205,7 @@ uv tool install 'ariadne-x[parquet]'`}</CodeBlock>
               <div className="behaviorGrid">
                 <article><h3>Branches, not whole trees</h3><p>A target includes its ancestors. Sibling replies are not discovered or appended.</p></article>
                 <article><h3>Dates select targets</h3><p><code>--since</code> does not discard older ancestors needed by a selected branch.</p></article>
-                <article><h3>Partial data stays visible</h3><p>Unresolved posts produce warnings and a <code>[deleted]</code> placeholder unless <code>--strict</code> is set.</p></article>
+                <article><h3>Partial data stays visible</h3><p>Unresolved posts keep their place as a placeholder — <code>[deleted]</code>, or a named post with no text — unless <code>--strict</code> is set.</p></article>
                 <article><h3>Quotes have two jobs</h3><p>Quote context is attached separately. A root quote-tweet is spliced onto its quoted post by default.</p></article>
               </div>
               <div className="notice">
@@ -438,8 +440,7 @@ except ariadne.AriadneError as exc:
               </div>
               <CodeBlock label="Contributing">{`uv sync --extra dev --extra parquet
 uv run pytest
-uv run ruff check .
-uv run mypy src`}</CodeBlock>
+uv run ruff check .`}</CodeBlock>
             </section>
           </article>
 

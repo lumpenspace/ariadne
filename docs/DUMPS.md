@@ -28,8 +28,8 @@ or edits its source.
 | --- | --- | --- |
 | Personal X/Twitter archive | folder, ZIP, or archive data file | `twitter-archive` |
 | Community Archive export | CSV folder or ZIP | `community-csv` |
-| Parquet collection | directory containing tweet-shaped Parquet files | `parquet` |
-| Generic tweet dump | CSV, JSON, or JSONL file | `tweets-file` |
+| Parquet collection | one `.parquet` file, or a directory of them | `parquet` |
+| Generic tweet dump | CSV, JSON, JSONL, or NDJSON file | `tweets-file` |
 
 Kind detection is automatic. Use `--kind` when the source is ambiguous.
 Parquet support requires the optional extra:

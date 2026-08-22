@@ -27,9 +27,11 @@ reply-parent chain toward its root, attaches quote context, and renders the resu
 root → target.
 
 It does not pretend sparse data is complete. A post it cannot resolve keeps its
-place in the branch as `[deleted]`, with a warning naming the id, so a gap is
-something you can see and count rather than a silent omission. Ask for
-`--strict` when you would rather fail than keep a partial branch.
+place in the branch rather than vanishing from it: one it knows nothing about
+renders as `[deleted]` and raises a warning, while one it can name but never
+fetched keeps its author and reads `[tweet <id> has no text]`. Either way the
+gap is visible and countable. Ask for `--strict` when you would rather fail
+than keep a partial branch.
 
 ## Start here
 
@@ -182,9 +184,10 @@ ariadne bluesky alice.bsky.social --since 2024-01-01 --format raft
 
 ## Picking up where a build left off
 
-Every build that fetches anything writes a cache (`.ariadne-cache.json` by
-default) — and since 0.6 it also records the tweet ids it could *not*
-resolve, so the holes survive the session:
+Every build that fetches anything writes a cache — `.ariadne-cache.json` unless
+you point `--cache PATH` somewhere else or pass `--no-cache` — and since 0.6 it
+also records the tweet ids it could *not* resolve, so the holes survive the
+session:
 
 ```bash
 ariadne cache list                 # what each cache holds, and what is still missing
@@ -214,7 +217,10 @@ retry after a build using the same cache has finished, not alongside it.
 uv sync --extra dev --extra parquet
 uv run pytest
 uv run ruff check .
-uv run mypy src
 ```
+
+Those two are what CI runs. The package ships `py.typed`, so type-checking a
+consumer's code against it is expected to work; the repo's own tree is not
+mypy-clean yet, and mypy is deliberately not in the dev extra.
 
 MIT licensed. The thread was there all along.

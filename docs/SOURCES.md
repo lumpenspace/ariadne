@@ -46,13 +46,22 @@ seeding top-level posts. When cheap sources return only text and IDs, Ariadne ca
 use those IDs as candidates, but X API or a richer dump is needed to prove which
 ones are replies.
 
-Interactive mode follows the same policy: it asks for a username and/or archive
-plus a date, runs the cheap-source pass, prints a summary of tweets,
-conversations, unavailable output tweets, warnings, and sources, then asks
-whether to continue with X API.
+Interactive mode follows the same policy. It asks for an archive or dump path,
+a username, a date, an output format and file, a maximum reply depth, and then
+which sources to allow: oEmbed hydration, unofficial RSS (with bases and
+templates), whether to start only from replies, and whether to keep only
+conversations in which the user responds to somebody else — the interactive
+form of `--responses-only`, which defaults to yes here.
 
-Before that question it states the size of the gap — how many tweets are
-missing, and how many conversations they would complete:
+If the cache from an earlier session holds tweets, it reports how many are
+still missing and offers to retry them before building, so anything recovered
+flows straight into this run.
+
+It then runs the cheap-source pass and prints a summary — tweets in store,
+selected targets, reconstructed conversations, unavailable output tweets,
+warnings, and a count per source. Before offering the X API it states the size
+of the gap: how many tweets are missing, and how many conversations they would
+complete.
 
 ```text
 ◆ Cheap-source pass
@@ -61,16 +70,18 @@ missing, and how many conversations they would complete:
   reconstructed conversations: 31
   unavailable tweets in reconstructed output: 7
   warnings: 4
-  sources: dump:personal: 380, oembed: 25, unofficial-rss:nitter.net: 7
-  …
+  sources:
+    dump:personal: 380
+    oembed: 25
+    unofficial-rss:nitter.net: 7
   7 tweet(s) are missing to complete 6 of 31 conversation(s)
-» Continue with X API now? This may cost API reads [y/N]
+» Continue with X API now? This may cost API reads [Y/n]
 ```
 
 The count is deliberately shown before the prompt, not after it: X API reads
 may be billable, so the decision to spend them should be made against a number
 rather than a guess. When the cheap pass left nothing missing, it says so
-instead.
+instead — and the default answer flips to no, since there is nothing to buy.
 
 ## Recovering What Was Missing
 
@@ -112,4 +123,9 @@ ariadne bluesky alice.bsky.social --since 2024-01-01 --format raft
 ```
 
 The result uses the same `BuildResult` renderers and output schemas as X/Twitter
-reconstruction.
+reconstruction, and accepts `--responses-only` as well. Use `--no-replies` to
+walk only the actor's own posts, and `--limit` to bound how many recent posts
+are read.
+
+Every command's flags are listed by `ariadne <command> --help`, which is the
+authoritative reference; this page describes policy rather than repeating it.
