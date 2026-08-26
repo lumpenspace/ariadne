@@ -506,7 +506,7 @@ def _import_parquet_with_connection(
         columns = {row[0] for row in ddb.execute(f"DESCRIBE SELECT * FROM {_pq(path)}").fetchall()}
         if ("text" in columns or "full_text" in columns) and ("id" in columns or "tweet_id" in columns):
             tweet_files.append(path)
-        elif "screen_name" in columns and "platform_account_id" in columns:
+        elif _account_columns(columns) is not None:
             account_files.append(path)
         else:
             other.append(path.name)
@@ -517,9 +517,15 @@ def _import_parquet_with_connection(
 
     accounts: dict[str, tuple[str | None, str | None]] = {}
     for path in account_files:
+        columns = {row[0] for row in ddb.execute(f"DESCRIBE SELECT * FROM {_pq(path)}").fetchall()}
+        mapping = _account_columns(columns)
+        if mapping is None:  # pragma: no cover - classified as an account file above
+            continue
+        id_col, username_col, name_col = mapping
         rows = ddb.execute(
-            f"SELECT CAST(platform_account_id AS VARCHAR), any_value(screen_name), any_value(name) "
-            f"FROM {_pq(path)} WHERE screen_name IS NOT NULL GROUP BY 1"
+            f"SELECT CAST({id_col} AS VARCHAR), any_value({username_col}), "
+            f"any_value({name_col}) "
+            f"FROM {_pq(path)} WHERE {username_col} IS NOT NULL GROUP BY 1"
         ).fetchall()
         for account_id, username, name in rows:
             accounts.setdefault(account_id, (_norm_str(username), _norm_str(name)))
@@ -528,7 +534,7 @@ def _import_parquet_with_connection(
             "INSERT OR IGNORE INTO accounts (account_id, username, name) VALUES (?, ?, ?)",
             [(account_id, username, name) for account_id, (username, name) in accounts.items()],
         )
-        say(f"resolved {len(accounts):,} accounts from {len(account_files)} rankings file(s)")
+        say(f"resolved {len(accounts):,} accounts from {len(account_files)} profile file(s)")
 
     total = 0
     for path in tweet_files:
@@ -554,20 +560,47 @@ def _import_parquet_with_connection(
     return notes
 
 
+def _account_columns(columns: set[str]) -> tuple[str, str, str] | None:
+    """Map a profile/account parquet's columns to (id, username, display name).
+
+    Bulk exports disagree on what to call these three: the Borg/Hive rankings
+    files use platform_account_id/screen_name/name, while Community Archive
+    profile exports use account_id/username/display_name. Returning None means
+    the file is not an account file at all.
+    """
+    for id_col, username_col, name_col in (
+        ("platform_account_id", "screen_name", "name"),
+        ("account_id", "username", "display_name"),
+        ("account_id", "username", "name"),
+    ):
+        if id_col in columns and username_col in columns:
+            return id_col, username_col, name_col if name_col in columns else "NULL"
+    return None
+
+
 def _enriched_select(path: Path, columns: set[str]) -> str:
-    def col(name: str, cast: bool = False) -> str:
-        if name not in columns:
-            return "NULL"
-        return f"CAST({name} AS VARCHAR)" if cast else name
+    def col(*names: str, cast: bool = False) -> str:
+        """The first of `names` this file actually has, else NULL.
+
+        Exports of the same shape rename the same field -- a reply's author is
+        reply_to_user_id in one and reply_to_account_id in another -- so each
+        field lists its known spellings rather than silently importing NULL.
+        """
+        for name in names:
+            if name in columns:
+                return f"CAST({name} AS VARCHAR)" if cast else name
+        return "NULL"
 
     return (
         "SELECT "
         f"CAST(tweet_id AS VARCHAR), {col('full_text')}, {col('account_id', cast=True)}, "
-        f"{col('username')}, {col('account_display_name')}, "
+        f"{col('username')}, {col('account_display_name', 'display_name')}, "
         f"strftime(created_at, '%Y-%m-%dT%H:%M:%SZ'), {col('conversation_id', cast=True)}, "
-        f"{col('reply_to_tweet_id', cast=True)}, {col('reply_to_user_id', cast=True)}, "
+        f"{col('reply_to_tweet_id', cast=True)}, "
+        f"{col('reply_to_user_id', 'reply_to_account_id', cast=True)}, "
         f"{col('reply_to_username')}, {col('quoted_tweet_id', cast=True)}, "
-        f"{col('retweet_id', cast=True)}, {col('retweet_count')}, {col('favorite_count')} "
+        f"{col('retweet_id', 'retweeted_tweet_id', cast=True)}, "
+        f"{col('retweet_count')}, {col('favorite_count')} "
         f"FROM {_pq(path)}"
     )
 
@@ -575,12 +608,15 @@ def _enriched_select(path: Path, columns: set[str]) -> str:
 def _enriched_row(row: tuple, accounts: dict[str, tuple[str | None, str | None]]) -> tuple:
     (tweet_id, text, author_id, username, name, created, conversation, reply, reply_user,
      reply_username, quoted, retweet_of, retweets, favorites) = row
+    # A tweets export often carries only the numeric author id, with handles in
+    # a sibling profiles file; without this the whole dump imports anonymous.
+    resolved_username, resolved_name = accounts.get(_norm_id(author_id) or "", (None, None))
     return (
         tweet_id,
         text or "",
         _norm_id(author_id),
-        _norm_str(username),
-        _norm_str(name),
+        _norm_str(username) or resolved_username,
+        _norm_str(name) or resolved_name,
         created,
         _norm_id(conversation),
         _norm_id(reply),

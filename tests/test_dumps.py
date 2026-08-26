@@ -596,6 +596,121 @@ class ParquetTests(DumpTestCase):
         self.assertEqual(reply.created_at, "2022-03-04T12:00:00Z")
         self.assertEqual(client.get_user_posts("dave").tweets[0].id, "301")
 
+    def test_community_archive_profiles_resolve_tweet_authors(self) -> None:
+        """A tweets+profiles export must not import as 10M anonymous rows.
+
+        The tweets file carries only account_id; the handles live in a sibling
+        profiles file that spells its columns differently from the rankings
+        layout, and the reply/retweet columns are named differently again.
+        """
+        source = Path(self.home) / "ca-src"
+        source.mkdir(parents=True)
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute(
+            f"""
+            COPY (
+                SELECT * FROM (VALUES
+                    ('501', '31', TIMESTAMPTZ '2026-01-01 10:00:00+00', 'the parent',
+                     CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR),
+                     CAST(NULL AS VARCHAR), '501'),
+                    ('502', '32', TIMESTAMPTZ '2026-01-02 10:00:00+00', 'a reply to it',
+                     '501', '31', CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), '501'),
+                    ('503', '32', TIMESTAMPTZ '2026-01-03 10:00:00+00', 'a quote of it',
+                     CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), '501',
+                     CAST(NULL AS VARCHAR), '503')
+                ) AS t(tweet_id, account_id, created_at, full_text,
+                       reply_to_tweet_id, reply_to_account_id, quoted_tweet_id,
+                       retweeted_tweet_id, conversation_id)
+            ) TO '{source / "tweets.parquet"}' (FORMAT PARQUET)
+            """
+        )
+        con.execute(
+            f"""
+            COPY (
+                SELECT * FROM (VALUES
+                    ('31', 'gina', 'Gina G'), ('32', 'hank', 'Hank H')
+                ) AS t(account_id, username, display_name)
+            ) TO '{source / "profiles.parquet"}' (FORMAT PARQUET)
+            """
+        )
+        con.close()
+
+        info = import_dump(source, name="ca-mini")
+        self.assertEqual(info.tweets, 3)
+        self.assertEqual(info.accounts, 2)
+        self.assertNotIn(
+            "profiles.parquet",
+            " ".join(info.notes),
+            "the profiles file must be imported, not skipped as unrecognized",
+        )
+
+        client = LocalDumpsClient(names=["ca-mini"])
+        parent = client.get_posts(["501"]).tweets[0]
+        self.assertEqual(parent.username, "gina")
+        self.assertEqual(parent.name, "Gina G")
+
+        reply = client.get_posts(["502"]).tweets[0]
+        self.assertEqual(reply.username, "hank")
+        self.assertEqual(reply.in_reply_to_id, "501")
+        # reply_to_account_id, not reply_to_user_id, in this layout
+        self.assertEqual(reply.in_reply_to_user_id, "31")
+
+        quote = client.get_posts(["503"]).tweets[0]
+        self.assertEqual(quote.quote_ids(), ["501"])
+
+        # selection by handle only works when the profiles were applied
+        self.assertEqual(
+            sorted(t.id for t in client.get_user_posts("hank").tweets), ["502", "503"]
+        )
+
+    def test_retweeted_tweet_id_marks_a_retweet(self) -> None:
+        source = Path(self.home) / "rt-src"
+        source.mkdir(parents=True)
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute(
+            f"""
+            COPY (
+                SELECT * FROM (VALUES
+                    ('601', '41', TIMESTAMPTZ '2026-02-01 10:00:00+00', 'RT text', '600')
+                ) AS t(tweet_id, account_id, created_at, full_text, retweeted_tweet_id)
+            ) TO '{source / "tweets.parquet"}' (FORMAT PARQUET)
+            """
+        )
+        con.execute(
+            f"""
+            COPY (SELECT * FROM (VALUES ('41', 'ivy', 'Ivy I'))
+                  AS t(account_id, username, display_name)
+            ) TO '{source / "profiles.parquet"}' (FORMAT PARQUET)
+            """
+        )
+        con.close()
+
+        import_dump(source, name="rt-mini")
+        client = LocalDumpsClient(names=["rt-mini"])
+        # retweets are excluded from a timeline unless asked for, which only
+        # works if retweeted_tweet_id landed in retweet_of_id
+        self.assertEqual(client.get_user_posts("ivy").tweets, [])
+        self.assertEqual(
+            len(client.get_user_posts("ivy", include_retweets=True).tweets), 1
+        )
+
+    def test_rankings_layout_still_detected_as_accounts(self) -> None:
+        """Widening profile detection must not break the older layout."""
+        from ariadne.dumps import _account_columns
+
+        self.assertEqual(
+            _account_columns({"platform_account_id", "screen_name", "name"}),
+            ("platform_account_id", "screen_name", "name"),
+        )
+        self.assertEqual(
+            _account_columns({"account_id", "username", "display_name"}),
+            ("account_id", "username", "display_name"),
+        )
+        # a tweets file must never be mistaken for an account file
+        self.assertIsNone(_account_columns({"tweet_id", "full_text", "account_id"}))
+
     def test_enriched_layout_single_file(self) -> None:
         path = Path(self.home) / "enriched.parquet"
         con = duckdb.connect()

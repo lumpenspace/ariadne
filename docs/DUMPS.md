@@ -31,6 +31,32 @@ or edits its source.
 | Parquet collection | one `.parquet` file, or a directory of them | `parquet` |
 | Generic tweet dump | CSV, JSON, JSONL, or NDJSON file | `tweets-file` |
 
+### Parquet with a separate profiles file
+
+Bulk parquet exports usually split the data in two: a tweets file keyed by
+numeric `account_id`, and a companion file holding the handles. Put both in one
+directory and import the directory, not the individual files — imported alone,
+the tweets file has no handles to attach, so every post lands with an
+unresolved author and `--for-user` can never match it.
+
+```bash
+ls ~/DATA/my-export/
+# profiles.parquet  tweets.parquet
+ariadne dumps import ~/DATA/my-export --name my-export
+# resolved 737 accounts from 1 profile file(s)
+```
+
+Both spellings of the companion file are recognized: `account_id` +
+`username` + `display_name` (Community Archive profile exports) and
+`platform_account_id` + `screen_name` + `name` (Borg/Hive `rankings/*.parquet`).
+Tweet-side column names that differ between exports — `reply_to_account_id`
+for `reply_to_user_id`, `retweeted_tweet_id` for `retweet_id` — are accepted
+too, so reply and retweet edges survive the import.
+
+The import reports what it resolved. `0 accounts`, a `parquet files not
+imported: ...` note naming your profiles file, or a warning that tweets have
+no resolved username all mean the handles did not get attached.
+
 Kind detection is automatic. Use `--kind` when the source is ambiguous.
 Parquet support requires the optional extra:
 
