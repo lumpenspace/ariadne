@@ -52,7 +52,7 @@ from .timeutil import api_time, parse_datetime, parse_since
 
 Progress = Callable[[str], None]
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 _TWEET_COLUMNS = (
     "id",
@@ -91,6 +91,10 @@ CREATE TABLE tweets (
     retweet_of_id TEXT,
     retweet_count INTEGER,
     favorite_count INTEGER
+);
+CREATE TABLE known_authors (
+    tweet_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL
 );
 CREATE TABLE user_summary (
     username TEXT PRIMARY KEY COLLATE NOCASE,
@@ -541,8 +545,10 @@ def _import_parquet_with_connection(
         say(f"resolved {len(accounts):,} accounts from {len(account_files)} profile file(s)")
 
     total = 0
+    named = 0
     for path in tweet_files:
         columns = {row[0] for row in ddb.execute(f"DESCRIBE SELECT * FROM {_pq(path)}").fetchall()}
+        named += _import_known_authors(con, ddb, path, columns)
         if "tweet_id" in columns:
             select, make_row = _enriched_select(path, columns), _enriched_row
         else:
@@ -556,12 +562,66 @@ def _import_parquet_with_connection(
             con.commit()
             total += len(batch)
             say(f"loaded {total:,} tweets")
+    if named:
+        say(f"named {named:,} quoted tweet(s) this dump does not hold")
     account_rows = con.execute(
         "SELECT DISTINCT author_id, username, name FROM tweets "
         "WHERE author_id IS NOT NULL AND username IS NOT NULL"
     ).fetchall()
     con.executemany("INSERT OR IGNORE INTO accounts (account_id, username, name) VALUES (?, ?, ?)", account_rows)
     return notes
+
+
+_STATUS_URL = re.compile(
+    r"(?:twitter|x)\.com/([A-Za-z0-9_]{1,15})/status(?:es)?/(\d+)", re.IGNORECASE
+)
+
+
+def author_from_status_url(url: str | None, tweet_id: str | None = None) -> str | None:
+    """The handle in a tweet permalink, optionally requiring a given id.
+
+    A quote-tweet's export carries the quoted permalink among its expanded
+    urls. That is the only place the quoted author's handle appears, and
+    without it a quoted tweet we do not hold cannot even be named -- which is
+    what oEmbed needs to go and fetch it.
+    """
+    match = _STATUS_URL.search(url or "")
+    if not match:
+        return None
+    if tweet_id is not None and match.group(2) != str(tweet_id):
+        return None
+    return match.group(1)
+
+
+def _import_known_authors(con: sqlite3.Connection, ddb: Any, path: Path, columns: set[str]) -> int:
+    """Record the authors of quoted tweets this dump does not itself hold."""
+    if "quoted_tweet_id" not in columns or "urls" not in columns:
+        return 0
+    rows = ddb.execute(
+        "SELECT CAST(quoted_tweet_id AS VARCHAR), u['2'] "
+        f"FROM (SELECT quoted_tweet_id, unnest(urls) u FROM {_pq(path)} "
+        "WHERE quoted_tweet_id IS NOT NULL) WHERE u['2'] IS NOT NULL"
+    ).fetchall()
+    pairs = {}
+    for quoted_id, url in rows:
+        handle = author_from_status_url(url, quoted_id)
+        if handle:
+            pairs.setdefault(str(quoted_id), handle)
+    if pairs:
+        con.executemany(
+            "INSERT OR IGNORE INTO known_authors (tweet_id, username) VALUES (?, ?)",
+            sorted(pairs.items()),
+        )
+        con.commit()
+    return len(pairs)
+
+
+def _has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return bool(
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+    )
 
 
 def _account_columns(columns: set[str]) -> tuple[str, str, str] | None:
@@ -854,8 +914,42 @@ class LocalDumpsClient:
                     tweet = _row_to_tweet(row, path.stem)
                     current = merged.get(tweet.id)
                     merged[tweet.id] = tweet if current is None else merge_tweets(current, tweet)
+        # Ids we could not produce a tweet for, but whose author we know from a
+        # quoted permalink, come back as a named stub. It carries no text, so
+        # later fetchers still treat it as unresolved -- but it now has a URL,
+        # which is the one thing oEmbed needs to go and fetch the real thing.
+        for tweet_id, username in self._known_authors(
+            [tweet_id for tweet_id in wanted if tweet_id not in merged]
+        ).items():
+            merged[tweet_id] = Tweet(
+                id=tweet_id,
+                username=username,
+                url=f"https://x.com/{username}/status/{tweet_id}",
+                source="dump:quote-reference",
+            )
         result.tweets.extend(merged.values())
         return result
+
+    def _known_authors(self, ids: list[str]) -> dict[str, str]:
+        """Handles for tweets the dumps reference but do not hold."""
+        found: dict[str, str] = {}
+        if not ids:
+            return found
+        for path in self.paths:
+            connection = self._con(path)
+            if not _has_table(connection, "known_authors"):
+                continue  # dump imported before schema 3
+            for start in range(0, len(ids), 500):
+                batch = [tweet_id for tweet_id in ids[start : start + 500] if tweet_id not in found]
+                if not batch:
+                    continue
+                placeholders = ",".join("?" * len(batch))
+                for tweet_id, username in connection.execute(
+                    f"SELECT tweet_id, username FROM known_authors WHERE tweet_id IN ({placeholders})",
+                    batch,
+                ):
+                    found.setdefault(str(tweet_id), username)
+        return found
 
     def get_user_posts(
         self,

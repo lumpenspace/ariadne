@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ariadne.api import BuildOptions, build_conversations
 from ariadne.dumps import (
+    SCHEMA_VERSION,
     LocalDumpsClient,
     detect_kind,
     dumps_dir,
@@ -284,7 +285,7 @@ class LocalDumpsClientTests(DumpTestCase):
         )
         self.assertEqual([tweet.id for tweet in posts.tweets], ["103"])
 
-    def test_schema_v2_summaries_and_unresolved_metadata_avoid_tweet_scans(self) -> None:
+    def test_current_schema_summaries_and_unresolved_metadata_avoid_tweet_scans(self) -> None:
         source = Path(self.home) / "community-src"
         with (source / "tweets.csv").open("a", encoding="utf-8") as fp:
             fp.write("104,99,2024-04-01 10:00:00+00,unknown author,0,0,,,,1\n")
@@ -292,7 +293,7 @@ class LocalDumpsClientTests(DumpTestCase):
         path = dumps_dir() / "summaries.db"
         with sqlite3.connect(path) as connection:
             meta = dict(connection.execute("SELECT key, value FROM meta"))
-            self.assertEqual(meta["version"], "2")
+            self.assertEqual(meta["version"], SCHEMA_VERSION)
             self.assertEqual(meta["unresolved"], "1")
             alice = connection.execute(
                 "SELECT tweets, first_tweet, last_tweet FROM user_summary WHERE username = 'alice'"
@@ -663,6 +664,69 @@ class ParquetTests(DumpTestCase):
         self.assertEqual(
             sorted(t.id for t in client.get_user_posts("hank").tweets), ["502", "503"]
         )
+
+    def test_quoted_tweet_we_do_not_hold_is_still_named(self) -> None:
+        """A quoted tweet absent from the dump must still get a handle.
+
+        oEmbed can only fetch a tweet it can build a URL for. A reply parent
+        gets one from the reply's own metadata; a quote target has no such
+        source except the quoted permalink among the export's expanded urls.
+        Without this the tweet is unnameable and unfetchable by any free
+        source.
+        """
+        source = Path(self.home) / "quote-src"
+        source.mkdir(parents=True)
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute(
+            f"""
+            COPY (
+                SELECT * FROM (VALUES
+                    ('701', '51', TIMESTAMPTZ '2026-03-01 10:00:00+00', 'quoting them',
+                     '700', [{{'1': 'https://t.co/abc', '2': 'https://twitter.com/jo/status/700', '3': 'x'}}])
+                ) AS t(tweet_id, account_id, created_at, full_text, quoted_tweet_id, urls)
+            ) TO '{source / "tweets.parquet"}' (FORMAT PARQUET)
+            """
+        )
+        con.execute(
+            f"""
+            COPY (SELECT * FROM (VALUES ('51', 'kim', 'Kim K'))
+                  AS t(account_id, username, display_name)
+            ) TO '{source / "profiles.parquet"}' (FORMAT PARQUET)
+            """
+        )
+        con.close()
+
+        import_dump(source, name="quote-mini")
+        client = LocalDumpsClient(names=["quote-mini"])
+
+        # the quoted tweet itself is not in the dump...
+        self.assertEqual(
+            client.get_user_posts("jo").tweets, [], "the quoted tweet is not held"
+        )
+        # ...but asking for it by id yields a named, fetchable stub
+        stub = client.get_posts(["700"]).tweets
+        self.assertEqual(len(stub), 1)
+        self.assertEqual(stub[0].username, "jo")
+        self.assertEqual(stub[0].url, "https://x.com/jo/status/700")
+        self.assertEqual(stub[0].text, "", "a stub must carry no text")
+
+        # an unrelated id must not invent anything
+        self.assertEqual(client.get_posts(["999"]).tweets, [])
+
+    def test_permalink_author_requires_a_matching_id(self) -> None:
+        from ariadne.dumps import author_from_status_url
+
+        self.assertEqual(
+            author_from_status_url("https://twitter.com/jo/status/700", "700"), "jo"
+        )
+        self.assertEqual(author_from_status_url("https://x.com/jo/status/700"), "jo")
+        # a link to a *different* tweet must not name this one
+        self.assertIsNone(
+            author_from_status_url("https://twitter.com/jo/status/701", "700")
+        )
+        self.assertIsNone(author_from_status_url("https://example.com/jo", "700"))
+        self.assertIsNone(author_from_status_url(None, "700"))
 
     def test_retweeted_tweet_id_marks_a_retweet(self) -> None:
         source = Path(self.home) / "rt-src"
