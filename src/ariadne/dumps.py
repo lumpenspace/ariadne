@@ -10,11 +10,15 @@ Supported dump kinds (auto-detected, or forced with ``kind=``):
 
 - ``community-csv`` — the Community Archive per-table CSV dump: a folder or
   zip containing ``tweets.csv``, ``account.csv``, and friends.
-- ``parquet`` — bulk parquet exports. Both the Community Archive
-  ``enriched_tweets.parquet`` schema and the Borg/Hive "tpot dump" layout
-  (``tweets.parquet`` keyed by numeric author ids, with usernames resolved
-  from ``rankings/*.parquet`` when present). Reading parquet needs the
-  optional duckdb dependency: ``pip install 'ariadne-x[parquet]'``.
+- ``parquet`` — bulk parquet exports. Handles the Community Archive
+  ``enriched_tweets.parquet`` schema (handles inline) and the layouts that
+  key tweets by numeric author id and keep the handles in a companion file:
+  the Borg/Hive "tpot dump" (``rankings/*.parquet`` with
+  platform_account_id/screen_name/name) and Community Archive profile
+  exports (``profiles.parquet`` with account_id/username/display_name).
+  Import the *directory* holding both, or the tweets import anonymously.
+  Reading parquet needs the optional duckdb dependency:
+  ``pip install 'ariadne-x[parquet]'``.
 - ``twitter-archive`` — a personal X/Twitter archive folder, zip, or data file.
 - ``tweets-file`` — any generic CSV/JSON/JSONL tweet dump ariadne can read.
 
