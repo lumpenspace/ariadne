@@ -112,6 +112,15 @@ class ChainFetcherTests(unittest.TestCase):
         self.assertEqual(result.tweets, [])
         self.assertIn("Z", result.errors)
 
+    def test_provider_skip_reaches_later_fallback(self):
+        first = self.Fake([])
+        first.get_posts = lambda ids: FetchResult(skipped={tweet_id: "no URL" for tweet_id in ids})
+        second = self.Fake([Tweet(id="Z", text="found", username="alice")])
+        result = ChainFetcher([first, second]).get_posts(["Z"])
+        self.assertEqual([tweet.id for tweet in result.tweets], ["Z"])
+        self.assertEqual(result.errors, {})
+        self.assertEqual(result.skipped, {})
+
 
 class BlueskyTests(unittest.TestCase):
     ROOT = "at://did:plc:root/app.bsky.feed.post/r0"

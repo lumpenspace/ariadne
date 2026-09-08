@@ -78,14 +78,14 @@ Common options, all optional:
 | `dump`, `no_dumps`, `dump_limit` | Persistent local dump selection and timeline safety bound |
 | `cache`, `no_cache` | Tweet cache, default `.ariadne-cache.json` |
 | `strict`, `max_depth`, `no_quotes`, `quote_as_reply` | Reconstruction behaviour |
-| `responses_only` | Keep only branches in which the subject responds to somebody else |
+| `responses_only` | Discard corpus-only branches and keep proven cross-user replies |
 | `allow_empty` | Return an empty result instead of raising when nothing matches |
 | `format`, `output` | Defaults used by `result.render()` and the CLI |
 
-`responses_only=True` drops standalone posts and pure self-threads, keeping
-branches where the subject replied to or quote-tweeted someone — the shape most
-finetuning and Q/A datasets want. A reply to an unresolvable post still counts,
-since the missing parent was somebody. The predicate is public as
+`responses_only=True` drops standalone posts, self-threads, quote commentary,
+and incomplete replies. A branch survives only when a substantive subject
+tweet replies to a substantive tweet by a known different author; an unknown
+or deleted parent is not evidence of a training exchange. The predicate is public as
 `ariadne.conversation_has_response(conversation, store, subject=...)` if you
 would rather filter the conversations yourself.
 

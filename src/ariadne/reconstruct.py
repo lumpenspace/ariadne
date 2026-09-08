@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from collections import defaultdict
 from typing import Protocol
 
 from .errors import ReconstructionError
@@ -34,12 +36,18 @@ class ConversationBuilder:
         self.strict = strict
         self.max_depth = max_depth
         self.warnings: list[str] = []
+        self._attempted_ids: set[str] = set()
+        self._fetch_errors: dict[str, set[str]] = defaultdict(set)
+        self._fetch_skips: dict[str, set[str]] = defaultdict(set)
+        self._unavailable_ids: set[str] = set()
 
     def build(self, target_ids: list[str]) -> list[Conversation]:
         target_ids = unique_preserve_order(target_ids)
         self._ensure(target_ids)
         conversations = [self._build_conversation(target_id) for target_id in target_ids]
-        return prune_subset_conversations(conversations)
+        conversations = prune_subset_conversations(conversations)
+        self._append_fetch_summaries()
+        return conversations
 
     def _build_conversation(self, target_id: str) -> Conversation:
         before = len(self.warnings)
@@ -72,13 +80,14 @@ class ConversationBuilder:
             self._ensure([current_id])
 
             tweet = self.store.get(current_id)
-            if tweet is None:
+            if tweet is None or not tweet.available:
                 message = f"Tweet {current_id} is missing and could not be fetched"
                 if self.strict:
                     raise ReconstructionError(message)
-                self.warnings.append(message)
-                tweet = missing_tweet(current_id, source="missing")
-                self.store.add(tweet)
+                self._unavailable_ids.add(current_id)
+                if tweet is None:
+                    tweet = missing_tweet(current_id, source="missing")
+                    self.store.add(tweet)
             elif not tweet.text and tweet.available:
                 self._ensure([current_id], hydrate_empty=True)
                 tweet = self.store.get(current_id) or tweet
@@ -137,8 +146,10 @@ class ConversationBuilder:
     def _ensure(self, ids: list[str], *, hydrate_empty: bool = False) -> None:
         wanted = []
         for tweet_id in unique_preserve_order(ids):
+            if tweet_id in self._attempted_ids:
+                continue
             tweet = self.store.get(tweet_id)
-            if tweet is None:
+            if tweet is None or not tweet.available:
                 wanted.append(tweet_id)
             elif hydrate_empty and tweet.available and not tweet.text:
                 wanted.append(tweet_id)
@@ -146,26 +157,80 @@ class ConversationBuilder:
             return
         if self.fetcher is None:
             return
+        self._attempted_ids.update(wanted)
         result = self.fetcher.get_posts(wanted)
         self.store.add_many(result.tweets, cacheable=True)
         for tweet_id, message in result.errors.items():
             if not self.store.contains(tweet_id):
-                self.warnings.append(f"Could not fetch tweet {tweet_id}: {message}")
                 if not self.strict:
                     self.store.add(missing_tweet(tweet_id, source=f"fetch-error:{message}"))
+            self._fetch_errors[message].add(tweet_id)
+        for tweet_id, message in result.skipped.items():
+            if not self.store.contains(tweet_id) and not self.strict:
+                self.store.add(missing_tweet(tweet_id, source="missing"))
+            self._fetch_skips[message].add(tweet_id)
 
     def _add_reply_parent_stub(self, tweet: Tweet, parent_id: str) -> None:
-        if self.store.contains(parent_id) or not tweet.in_reply_to_username:
+        username = _reply_parent_username(tweet)
+        if not username:
             return
-        username = tweet.in_reply_to_username.strip("@")
         self.store.add(
             Tweet(
                 id=parent_id,
                 username=username,
                 url=f"https://x.com/{username}/status/{parent_id}",
                 source="reply-reference",
+                available=False,
             )
         )
+
+    def _append_fetch_summaries(self) -> None:
+        for reason, ids in self._fetch_errors.items():
+            unresolved = {tweet_id for tweet_id in ids if not _is_resolved(self.store, tweet_id)}
+            if unresolved:
+                self.warnings.append(_fetch_summary("Could not fetch", reason, unresolved))
+        unavailable = {
+            tweet_id
+            for tweet_id in self._unavailable_ids
+            if not _is_resolved(self.store, tweet_id)
+        }
+        if unavailable:
+            message = _fetch_summary(
+                "Still unavailable after all enabled sources tried",
+                "missing tweet content",
+                unavailable,
+            )
+            if self._fetch_skips:
+                message += (
+                    "; oEmbed needs a known tweet URL, so use Community Archive, "
+                    "twitterapi.io, or X API for raw-ID lookup"
+                )
+            self.warnings.append(message)
+
+
+_LEADING_REPLY_MENTION = re.compile(r"^\s*@([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_])")
+
+
+def _reply_parent_username(tweet: Tweet) -> str | None:
+    explicit = (tweet.in_reply_to_username or "").strip().strip("@")
+    if explicit:
+        return explicit
+    match = _LEADING_REPLY_MENTION.match(tweet.text or "")
+    return match.group(1) if match else None
+
+
+def _fetch_summary(prefix: str, reason: str, ids: set[str]) -> str:
+    ordered = sorted(ids)
+    examples = ", ".join(ordered[:3])
+    if len(ordered) > 3:
+        examples += ", ..."
+    noun = "tweet" if len(ordered) == 1 else "tweets"
+    return f"{prefix} {len(ordered):,} {noun}: {reason} (examples: {examples})"
+
+
+def _is_resolved(store: TweetStore, tweet_id: str) -> bool:
+    tweet = store.get(tweet_id)
+    return bool(tweet and tweet.available and tweet.text)
 
 
 def prune_subset_conversations(conversations: list[Conversation]) -> list[Conversation]:

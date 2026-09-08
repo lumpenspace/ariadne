@@ -146,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     bluesky_cmd.add_argument(
         "--responses-only",
         action="store_true",
-        help="Only keep conversations in which the actor responds to someone else.",
+        help="Only keep substantive replies to a known different author.",
     )
     bluesky_cmd.add_argument(
         "--format",
@@ -350,9 +350,8 @@ def add_build_arguments(build_cmd: argparse.ArgumentParser) -> None:
         "--responses-only",
         action="store_true",
         help=(
-            "Only keep conversations in which the subject actually responds -- "
-            "replies to or quote-tweets someone else. Drops standalone tweets "
-            "and pure self-threads."
+            "Only keep substantive replies to a known different author. "
+            "Drops standalone posts, self-threads, quote commentary, and incomplete replies."
         ),
     )
     build_cmd.add_argument("--since", help="Only select user tweets on or after this date, e.g. 2024-01-01.")
@@ -581,9 +580,9 @@ def interactive(args: argparse.Namespace) -> int:
         rss_templates = parse_csv_values(templates)
     replies_only = prompt_yes_no("Use only reply tweets as starting targets?", default=False)
     responses_only = prompt_yes_no(
-        "Keep only conversations where the user responds to someone else? "
-        "Drops standalone tweets and self-threads",
-        default=True,
+        "Drop standalone posts and self-threads entirely? "
+        "They will not enter the corpus",
+        default=False,
     )
 
     # A cache from earlier sessions may already hold tweets -- and a list of

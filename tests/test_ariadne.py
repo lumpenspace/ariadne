@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ariadne.archive import load_archive
 from ariadne.cli import CheapFirstFetcher, collect_conversations, is_reply_start, needs_official_metadata
-from ariadne.fetch import FetchResult, tweet_from_oembed_payload
+from ariadne.fetch import FetchResult, OEmbedClient, tweet_from_oembed_payload
 from ariadne.ids import extract_tweet_ids
 from ariadne.models import Conversation, Tweet, TweetRef
 from ariadne.reconstruct import ConversationBuilder, prune_subset_conversations
@@ -284,6 +284,149 @@ class AriadneTests(unittest.TestCase):
         assert parent is not None
         self.assertEqual(parent.text, "parent")
 
+    def test_leading_reply_mention_creates_parent_url_stub(self) -> None:
+        store = TweetStore()
+        store.add(
+            Tweet(
+                id="2",
+                text="  @alice hello",
+                username="bob",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+
+        class FakeFetcher:
+            def get_posts(self, ids):
+                parent = store.get("1")
+                self.url = parent.url if parent else None
+                return FetchResult(tweets=[Tweet(id="1", text="prompt", username="alice")])
+
+        fetcher = FakeFetcher()
+        [conversation] = ConversationBuilder(store, fetcher=fetcher).build(["2"])
+        self.assertEqual(fetcher.url, "https://x.com/alice/status/1")
+        self.assertEqual(conversation.path, ["1", "2"])
+
+    def test_explicit_parent_username_beats_leading_mention(self) -> None:
+        store = TweetStore()
+        store.add(
+            Tweet(
+                id="2",
+                text="@bob hello",
+                username="me",
+                in_reply_to_username="alice",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+
+        class FakeFetcher:
+            def get_posts(self, ids):
+                self.url = store.get("1").url
+                return FetchResult(tweets=[Tweet(id="1", text="prompt", username="alice")])
+
+        fetcher = FakeFetcher()
+        ConversationBuilder(store, fetcher=fetcher).build(["2"])
+        self.assertEqual(fetcher.url, "https://x.com/alice/status/1")
+
+    def test_nonleading_mention_does_not_supply_parent_context(self) -> None:
+        store = TweetStore()
+        store.add(
+            Tweet(
+                id="2",
+                text="hello @alice",
+                username="bob",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+
+        class FakeFetcher:
+            def get_posts(self, ids):
+                self.parent = store.get("1")
+                return FetchResult(skipped={"1": "unsupported"})
+
+        fetcher = FakeFetcher()
+        ConversationBuilder(store, fetcher=fetcher).build(["2"])
+        self.assertIsNone(fetcher.parent)
+
+    def test_reply_reference_enriches_and_retries_existing_tombstone(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="[deleted]", available=False, source="missing"))
+        store.add(
+            Tweet(
+                id="2",
+                text="@alice hello",
+                username="bob",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+
+        class FakeFetcher:
+            def get_posts(self, ids):
+                self.url = store.get("1").url
+                return FetchResult(tweets=[Tweet(id="1", text="recovered", username="alice")])
+
+        fetcher = FakeFetcher()
+        [conversation] = ConversationBuilder(store, fetcher=fetcher).build(["2"])
+        self.assertEqual(fetcher.url, "https://x.com/alice/status/1")
+        self.assertEqual(conversation.path, ["1", "2"])
+        self.assertEqual(store.get("1").text, "recovered")
+
+    def test_oembed_without_context_is_a_provider_skip(self) -> None:
+        class NoRequestOEmbed(OEmbedClient):
+            def _request(self, url):
+                raise AssertionError("contextless ids must not make an HTTP request")
+
+        result = NoRequestOEmbed().get_posts(["1"])
+        self.assertEqual(result.tweets, [])
+        self.assertEqual(result.errors, {})
+        self.assertIn("1", result.skipped)
+
+    def test_many_missing_parents_produce_one_summary_warning(self) -> None:
+        store = TweetStore()
+        targets = []
+        for index in range(20):
+            target = f"t{index}"
+            parent = f"p{index}"
+            targets.append(target)
+            store.add(
+                Tweet(
+                    id=target,
+                    text="reply",
+                    username="bob",
+                    referenced_tweets=[TweetRef("replied_to", parent)],
+                )
+            )
+
+        class SkippingFetcher:
+            def get_posts(self, ids):
+                return FetchResult(skipped={tweet_id: "no URL" for tweet_id in ids})
+
+        builder = ConversationBuilder(store, fetcher=SkippingFetcher())
+        builder.build(targets)
+        summaries = [warning for warning in builder.warnings if "Still unavailable" in warning]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn("20 tweets", summaries[0])
+        self.assertNotIn("canonical tweet URL", " ".join(builder.warnings))
+
+    def test_provider_skip_preserves_strict_reconstruction(self) -> None:
+        from ariadne.errors import ReconstructionError
+
+        store = TweetStore()
+        store.add(
+            Tweet(
+                id="2",
+                text="reply",
+                username="bob",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+
+        class SkippingFetcher:
+            def get_posts(self, ids):
+                return FetchResult(skipped={tweet_id: "unsupported" for tweet_id in ids})
+
+        with self.assertRaises(ReconstructionError):
+            ConversationBuilder(store, fetcher=SkippingFetcher(), strict=True).build(["2"])
+
     def test_nitter_rss_parses_recent_tweets(self) -> None:
         payload = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -553,18 +696,54 @@ class ResponsesOnlyTests(unittest.TestCase):
         conversation, has_response = self.build(store, "2")
         self.assertFalse(has_response(conversation, store, subject="bob"))
 
-    def test_quote_tweet_is_a_response(self) -> None:
+    def test_quote_tweet_is_corpus_not_a_reply_response(self) -> None:
         store = TweetStore()
         store.add(Tweet(id="9", text="quoted", username="alice"))
         store.add(Tweet(id="1", text="QT commentary", username="bob", referenced_tweets=[TweetRef("quoted", "9")]))
         conversation, has_response = self.build(store, "1")
-        self.assertTrue(has_response(conversation, store, subject="bob"))
+        self.assertFalse(has_response(conversation, store, subject="bob"))
 
-    def test_reply_to_unknown_author_counts_as_someone_else(self) -> None:
+    def test_reply_to_unknown_author_is_not_a_proven_response(self) -> None:
         store = TweetStore()
         store.add(Tweet(id="2", text="@x nope", username="bob", referenced_tweets=[TweetRef("replied_to", "1")]))
         conversation, has_response = self.build(store, "2")
-        self.assertTrue(has_response(conversation, store, subject="bob"))
+        self.assertFalse(has_response(conversation, store, subject="bob"))
+
+    def test_raft_routes_self_thread_to_corpus(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="thread one", username="bob"))
+        store.add(
+            Tweet(
+                id="2",
+                text="thread two",
+                username="bob",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+        [conversation] = ConversationBuilder(store).build(["2"])
+        row = json.loads(render([conversation], store, output_format="raft", subject="bob"))
+        self.assertEqual(row["kind"], "tweet_thread")
+        self.assertEqual(row["metadata"]["dataset_role"], "corpus")
+        self.assertEqual(row["metadata"]["classification"], "self_thread")
+        self.assertEqual(row["text"], "thread one\n\nthread two")
+
+    def test_raft_routes_only_substantive_other_reply_to_conversation(self) -> None:
+        store = TweetStore()
+        store.add(Tweet(id="1", text="question", username="alice"))
+        store.add(
+            Tweet(
+                id="2",
+                text="answer",
+                username="bob",
+                referenced_tweets=[TweetRef("replied_to", "1")],
+            )
+        )
+        [conversation] = ConversationBuilder(store).build(["2"])
+        row = json.loads(render([conversation], store, output_format="raft", subject="bob"))
+        self.assertEqual(row["kind"], "tweet_conversation")
+        self.assertEqual(row["metadata"]["dataset_role"], "conversation")
+        self.assertEqual(row["metadata"]["classification"], "reply")
+        self.assertTrue(row["metadata"]["has_subject_response"])
 
     def test_pipeline_drops_non_responses(self) -> None:
         store_file_tweets = [

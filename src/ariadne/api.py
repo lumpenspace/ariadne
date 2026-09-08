@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, TypedDict, Unpack, ov
 
 from ._types import OutputFormat, PathInput
 from .archive import load_archive
+from .classify import classify_conversation
 from .credentials import X_BEARER_TOKEN, delete_credential, load_credential
 from .dumps import LocalDumpsClient
 from .errors import ConfigurationError, NoTargetsError
@@ -35,7 +36,6 @@ from .models import Conversation, Tweet
 from .providers import CommunityArchiveClient, TwitterApiIoClient
 from .reconstruct import ConversationBuilder, TweetFetcher
 from .render import (
-    _role,
     json_payload,
     message_conversations,
     raft_documents,
@@ -196,9 +196,8 @@ class BuildOptions:
     author_id: str | None = None
     all_loaded: bool = False
     replies_only: bool = False
-    # Keep only conversations in which the subject actually responds --
-    # replies to or quote-tweets someone else. Drops standalone tweets and
-    # pure self-threads.
+    # Keep only substantive replies to a known different author. Drops
+    # standalone tweets, self-threads, quote commentary, and incomplete replies.
     responses_only: bool = False
     since: str | None = None
 
@@ -868,33 +867,8 @@ def conversation_has_response(
     *,
     subject: str | None = None,
 ) -> bool:
-    """Whether the subject actually responds in this conversation.
-
-    A response is a subject tweet that replies to, or quote-tweets, a tweet
-    not authored by the subject; an unknown author counts as someone else.
-    Standalone tweets and pure self-threads have no response. ``subject`` is
-    the collected username; without one, the author of the conversation's
-    target tweet is the subject (matching how roles are assigned).
-    """
-    target = store.get(conversation.target_id)
-
-    def is_subject(tweet: Tweet | None, tweet_id: str) -> bool:
-        role = _role(tweet, tweet_id, conversation, target, other="user", subject=subject)
-        return role == "assistant"
-
-    for tweet_id in conversation.path:
-        tweet = store.get(tweet_id)
-        if tweet is None or not is_subject(tweet, tweet_id):
-            continue
-        parent_id = tweet.reply_parent_id()
-        if parent_id and not is_subject(store.get(parent_id), parent_id):
-            return True
-        if any(
-            not is_subject(store.get(quote_id), quote_id)
-            for quote_id in tweet.quote_ids()
-        ):
-            return True
-    return False
+    """Whether this has a substantive subject reply to a known other author."""
+    return classify_conversation(conversation, store, subject=subject).has_subject_response
 
 
 def collect_input_values(items: list[str], input_files: list[str]) -> list[str]:
@@ -1047,6 +1021,7 @@ class CheapFirstFetcher:
         cheap = self.cheap_fetcher.get_posts(ids)
         result.tweets.extend(cheap.tweets)
         result.errors.update(cheap.errors)
+        result.skipped.update(cheap.skipped)
 
         cheap_by_id = {tweet.id: tweet for tweet in cheap.tweets if tweet.available}
         missing_ids = [
@@ -1060,8 +1035,14 @@ class CheapFirstFetcher:
         paid = self.paid_fetcher.get_posts(missing_ids)
         result.tweets.extend(paid.tweets)
         result.errors.update(paid.errors)
+        for tweet_id in paid.errors:
+            result.skipped.pop(tweet_id, None)
+        for tweet_id, reason in paid.skipped.items():
+            if tweet_id not in result.errors:
+                result.skipped[tweet_id] = reason
         for tweet in paid.tweets:
             result.errors.pop(tweet.id, None)
+            result.skipped.pop(tweet.id, None)
         return result
 
 
@@ -1080,6 +1061,7 @@ class ChainFetcher:
     def get_posts(self, ids: list[str]) -> FetchResult:
         merged: dict[str, Tweet] = {}
         errors: dict[str, str] = {}
+        skipped: dict[str, str] = {}
         remaining = unique_preserve_order(ids)
         for fetcher in self.fetchers:
             if not remaining:
@@ -1090,6 +1072,11 @@ class ChainFetcher:
                 if current is None or (tweet.available and tweet.text and not (current.available and current.text)):
                     merged[tweet.id] = tweet
             errors.update(result.errors)
+            for tweet_id in result.errors:
+                skipped.pop(tweet_id, None)
+            for tweet_id, reason in result.skipped.items():
+                if tweet_id not in errors:
+                    skipped[tweet_id] = reason
             remaining = [
                 tweet_id
                 for tweet_id in remaining
@@ -1097,7 +1084,8 @@ class ChainFetcher:
             ]
         for tweet_id in merged:
             errors.pop(tweet_id, None)
-        return FetchResult(tweets=list(merged.values()), errors=errors)
+            skipped.pop(tweet_id, None)
+        return FetchResult(tweets=list(merged.values()), errors=errors, skipped=skipped)
 
 
 def make_dumps_client(options: BuildOptions) -> LocalDumpsClient | None:

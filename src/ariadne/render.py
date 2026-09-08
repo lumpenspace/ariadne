@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Any
 
 from ._types import OutputFormat
+from .classify import classify_conversation
 from .models import Conversation, QuoteContext, Tweet
 from .store import TweetStore
 
@@ -124,6 +125,7 @@ def raft_documents(
     """Build the ``raft.documents.v1`` rows as data, one per conversation."""
     rows: list[dict[str, Any]] = []
     for conversation in conversations:
+        classification = classify_conversation(conversation, store, subject=subject)
         quote_map = _quotes_by_owner(conversation.quotes)
         target = store.get(conversation.target_id)
         messages: list[dict[str, Any]] = []
@@ -147,23 +149,33 @@ def raft_documents(
                 "text": content,
             }
             messages.append(message)
-            text_blocks.append(f"{author}: {content}")
+            if classification.dataset_role == "conversation":
+                text_blocks.append(f"{author}: {content}")
+            elif tweet_id in classification.subject_tweet_ids and tweet and tweet.available:
+                text_blocks.append(tweet.text)
             for quote_context in quote_map.get(tweet_id, []):
-                quote_text = _quote_block(quote_context, store)
-                text_blocks.append(quote_text)
+                if classification.dataset_role == "conversation":
+                    quote_text = _quote_block(quote_context, store)
+                    text_blocks.append(quote_text)
 
         target = store.get(conversation.target_id)
         row = {
             "format": "raft.documents.v1",
             "id": f"ariadne:{conversation.target_id}",
             "source": "ariadne",
-            "kind": "tweet_conversation",
+            "kind": classification.kind,
             "text": "\n\n".join(text_blocks),
             "metadata": {
                 "target_id": conversation.target_id,
                 "target_author": display_author(target),
                 "target_created_at": target.created_at if target else None,
                 "target_url": target.url if target else None,
+                "subject": classification.subject,
+                "dataset_role": classification.dataset_role,
+                "classification": classification.label,
+                "has_subject_response": classification.has_subject_response,
+                "response_tweet_ids": list(classification.response_tweet_ids),
+                "subject_tweet_ids": list(classification.subject_tweet_ids),
                 "tweet_ids": conversation.path,
                 "all_tweet_ids": sorted(conversation.all_ids),
                 "participants": sorted(participants),

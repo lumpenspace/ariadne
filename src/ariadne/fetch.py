@@ -42,6 +42,11 @@ USER_FIELDS = ("id", "name", "username")
 class FetchResult:
     tweets: list[Tweet] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
+    # An id may be unsupported by a provider without that provider having
+    # failed.  Keeping skips separate prevents local capability checks (such
+    # as oEmbed lacking a URL) from being reported as network errors while
+    # still allowing later providers to try the id.
+    skipped: dict[str, str] = field(default_factory=dict)
 
 
 class XApiError(SourceError):
@@ -211,7 +216,7 @@ class OEmbedClient:
         for tweet_id in unique_preserve_order(ids):
             url = self._url_for(tweet_id)
             if not url:
-                result.errors[tweet_id] = "oEmbed needs a canonical tweet URL or username"
+                result.skipped[tweet_id] = "oEmbed has no tweet URL or author handle"
                 continue
             try:
                 payload = self._request(url)

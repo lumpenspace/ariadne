@@ -114,7 +114,7 @@ and a follow-up in the same breath
 ## `raft`
 
 JSONL documents for retrieval, chunking, and RAFT ingestion. Each line is one
-reconstructed conversation:
+classified reconstructed branch:
 
 ```json
 {
@@ -128,6 +128,12 @@ reconstructed conversation:
     "target_author": "@bob",
     "target_created_at": "2024-01-02T12:00:00Z",
     "target_url": "https://x.com/bob/status/1002",
+    "subject": "bob",
+    "dataset_role": "conversation",
+    "classification": "reply",
+    "has_subject_response": true,
+    "response_tweet_ids": ["1002"],
+    "subject_tweet_ids": ["1002"],
     "tweet_ids": ["1001", "1002"],
     "all_tweet_ids": ["1001", "1002"],
     "participants": ["@alice", "@bob"],
@@ -158,9 +164,13 @@ reconstructed conversation:
 }
 ```
 
-`text` is optimized for retrieval and embedding. `messages` keeps per-post
-attribution and timestamps, `quotes` preserves attached quote paths, and the
-metadata fields keep selection, dedupe, and warning provenance.
+`dataset_role` is the routing contract. `conversation` rows are proven replies
+to another author and use `kind: tweet_conversation`; `corpus` rows use
+`kind: tweet_thread` and contain the subject's standalone post, self-thread,
+quote commentary, or incomplete reply. For corpus rows, `text` contains only
+the subject-authored material. `messages` keeps per-post attribution and
+timestamps, `quotes` preserves attached quote paths, and the remaining
+metadata keeps selection, dedupe, and warning provenance.
 
 ## Which branches are emitted
 
@@ -170,7 +180,6 @@ Every format renders the same set of branches, chosen before rendering:
   not discovered or appended.
 - A branch fully contained inside another is pruned, so overlapping targets in
   one thread do not produce duplicate documents.
-- With `--responses-only` (API: `responses_only=True`), only branches in which
-  the subject actually responds to somebody else survive — replies and quote
-  tweets. Standalone posts and pure self-threads are dropped. A reply to a
-  `[deleted]` post still counts, because the missing parent was somebody.
+- With `--responses-only` (API: `responses_only=True`), only proven replies to
+  known other authors survive. Standalone posts, self-threads, quote
+  commentary, and replies with unresolved prompts are dropped.

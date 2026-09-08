@@ -145,11 +145,15 @@ build knows who was collected. In `markdown`, consecutive tweets by the same
 person merge into one message: one role header, the metadata of every tweet in
 the run, then the texts separated by `---` rules.
 
-Pass `--responses-only` (API: `responses_only=True`) to keep only
-conversations in which the subject actually responds — replies to or
-quote-tweets someone else. Standalone tweets and pure self-threads are
-dropped; a reply to a deleted tweet counts as a response, since the missing
-parent was somebody. `ariadne interactive` asks the same question.
+Raft output classifies every branch before handoff. A substantive reply to a
+known different author is a `tweet_conversation`; standalone posts,
+self-threads, quote commentary, and replies with unresolved prompts are
+`tweet_thread` corpus rows. This keeps authored threads as long-form source
+material without inventing Q/A turns from missing or self-authored parents.
+
+Pass `--responses-only` (API: `responses_only=True`) only when you explicitly
+want to discard those corpus rows and retain proven cross-user replies.
+`ariadne interactive` keeps both by default.
 
 [Inspect the schemas →](docs/SCHEMA.md)
 

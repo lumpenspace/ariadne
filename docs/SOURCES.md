@@ -51,9 +51,9 @@ a username, a date, an output format, an output file (defaulting to a name
 built from the subject and date, so runs do not overwrite each other or
 disappear into the terminal), a maximum reply depth, and then
 which sources to allow: oEmbed hydration, unofficial RSS (with bases and
-templates), whether to start only from replies, and whether to keep only
-conversations in which the user responds to somebody else — the interactive
-form of `--responses-only`, which defaults to yes here.
+templates), whether to start only from replies, and whether to discard
+standalone/self-thread corpus material. The latter is the interactive form of
+`--responses-only`; it defaults to no, so authored threads reach the corpus.
 
 If the cache from an earlier session holds tweets, it reports how many are
 still missing and offers to retry them before building, so anything recovered
