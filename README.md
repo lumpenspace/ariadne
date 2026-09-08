@@ -233,9 +233,31 @@ between each, and stops as soon as it closes: local and cache, then free
 RSS and oEmbed, then the free Community Archive, then twitterapi.io, and only
 then X.
 
+## Serve it to a model
+
+Ariadne can expose the imported library over MCP, so a client like Claude
+Code can search the archives and rebuild conversations directly:
+
+```bash
+uv tool install 'ariadne-x[mcp]'
+ariadne mcp          # stdio; or: claude mcp add ariadne -- ariadne-mcp
+```
+
+Seven read-only tools: list the archives and the handles in them, full-text
+search, one handle's posts, one tweet in thread context, rebuilt
+conversations labelled conversation-or-corpus, and cache status.
+
+It is local-only by design — it never reaches oEmbed, the Community Archive,
+twitterapi.io or the X API, so an agent cannot spend your API credits or
+stall on a slow provider. Network passes stay in the terminal, where you
+approve them.
+
+[Read the MCP guide →](docs/MCP.md)
+
 ## Reference
 
 - [Documentation site](https://ariadne.hyperplex.org)
+- [MCP server](docs/MCP.md)
 - [Persistent archive library](docs/DUMPS.md)
 - [Python API](docs/API.md)
 - [Source behavior](docs/SOURCES.md)

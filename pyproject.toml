@@ -34,11 +34,13 @@ Issues = "https://github.com/lumpenspace/ariadne/issues"
 
 [project.scripts]
 ariadne = "ariadne.cli:main"
+ariadne-mcp = "ariadne.mcp_server:main"
 
 [project.optional-dependencies]
 # Reading parquet dumps (`ariadne dumps import`) needs duckdb.
 parquet = ["duckdb>=1.1"]
-dev = ["build>=1.2", "pytest>=8.0", "ruff>=0.8", "duckdb>=1.1"]
+mcp = ["mcp>=2.2"]
+dev = ["build>=1.2", "pytest>=8.0", "ruff>=0.8", "duckdb>=1.1", "mcp>=2.2"]
 
 [tool.hatch.version]
 path = "src/ariadne/__init__.py"

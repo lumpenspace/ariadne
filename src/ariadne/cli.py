@@ -49,7 +49,7 @@ from .store import cache_summary, stream_path
 from .store import save_cache  # noqa: F401  (stays importable from ariadne.cli)
 
 
-COMMANDS = {"build", "inspect-archive", "interactive", "bluesky", "dumps", "cache"}
+COMMANDS = {"build", "inspect-archive", "interactive", "bluesky", "dumps", "cache", "mcp"}
 
 # The pipeline moved to `api`; this module is now just an argparse front-end.
 # Everything below stays importable from `ariadne.cli` because it was public
@@ -103,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
             return bluesky_command(args)
         if args.command == "dumps":
             return dumps_command(args)
+        if args.command == "mcp":
+            from .mcp_server import main as mcp_main
+
+            return mcp_main()
         if args.command == "cache":
             return cache_command(args)
         return build(args)
@@ -163,6 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
         "cache", help="Inspect build caches and retry their missing tweets."
     )
     add_cache_arguments(cache_cmd)
+
+    subparsers.add_parser(
+        "mcp",
+        help="Run an MCP server over stdio exposing the local archive library.",
+        description=(
+            "Serve the imported archives to an MCP client over stdio. Reads "
+            "local dumps only -- it never fetches from the network, so it can "
+            "neither stall on slow providers nor spend API credits."
+        ),
+    )
     return parser
 
 

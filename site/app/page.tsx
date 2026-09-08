@@ -162,6 +162,14 @@ ariadne --help`}</CodeBlock>
                 context, warnings, and a <code>[deleted]</code> placeholder wherever a post could
                 not be resolved.
               </p>
+              <h3>Serve it to a model</h3>
+              <p>
+                <code>ariadne mcp</code> exposes the imported library over MCP, so a client
+                like Claude Code can search it and rebuild conversations directly. It is
+                local-only by design: it never reaches oEmbed, the Community Archive,
+                twitterapi.io or the X API, so an agent cannot spend your API credits.
+                Install it with <code>uv tool install &apos;ariadne-x[mcp]&apos;</code>.
+              </p>
               <h3>Prefer prompts?</h3>
               <p>
                 Run <code>ariadne interactive</code> for a guided conversation build. The local
@@ -456,6 +464,7 @@ except ariadne.AriadneError as exc:
                 <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/SCHEMA.md"><strong>Schemas</strong><span>All five output formats</span></a>
                 <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/API.md"><strong>Python API</strong><span>Typed public surface</span></a>
                 <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/RAFT.md"><strong>Raft</strong><span>Retrieval document integration</span></a>
+                <a href="https://github.com/lumpenspace/ariadne/blob/main/docs/MCP.md"><strong>MCP server</strong><span>Serve the archives to a model</span></a>
               </div>
               <CodeBlock label="Contributing">{`uv sync --extra dev --extra parquet
 uv run pytest
